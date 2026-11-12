@@ -66,7 +66,11 @@ cases('git push denied', 'deny', [
   'git push origin "refs/heads/*"',
   'git push --repo origin main',
   'git push --repo=origin feature/x:main',
+  // a tag source pushed onto a branch is a branch push
+  'git push origin refs/tags/v1:refs/heads/main',
+  'git push origin refs/tags/v1:dev',
 ]);
+cases('tag pushes allowed', 'allow', ['git push origin refs/tags/v1', 'git push origin refs/tags/v1:refs/tags/v1', 'git push origin v1.0:refs/tags/v1.0']);
 cases('git push allowed', 'allow', [
   'git push origin e08/x',
   'git push -u origin feature/x',
@@ -112,7 +116,14 @@ cases('ref-moving resets and unsafe pulls on protected branch denied', 'deny', [
   'git pull origin',
   'git pull --rebase',
   'git pull --ff-only origin feature/x',
+  'git pull --ff-only --no-ff',
+  'git pull --ff-only --ff',
+  'git pull --ff-only --rebase',
+  'git pull --ff-only --rebase=merges',
+  'git pull --ff-only -r',
+  'git pull --ff-only --no-rebase',
 ], { branch: 'test' });
+cases('pull with --ff-only last allowed on protected branch', 'allow', ['git pull --no-ff --ff-only', 'git pull --ff --ff-only origin', 'git pull -q --ff-only'], { branch: 'test' });
 describe('branch state in other directories', () => {
   const other = fakeRepo('devkit-other-');
   test('git -C into another repo asks for a commit', () => assert.equal(check(`git -C ${other.replace(/\\/g, '/')} commit -m "x"`), 'ask'));
@@ -124,6 +135,12 @@ describe('branch state in other directories', () => {
   test('switching to a protected branch is tracked', () => assert.equal(check('git switch main && git commit -m "x"'), 'deny'));
   test('switching away from a protected branch is tracked', () => assert.equal(check('git switch feature/y && git commit -m "x"', { branch: 'main' }), 'allow'));
   test('checkout of a file is not a branch switch', () => assert.equal(check('git checkout src && git commit -m "x"', { branch: 'main' }), 'deny'));
+  const prev = (out) => mockExec({ 'git rev-parse --abbrev-ref @{-1}': out, 'git rev-parse --abbrev-ref @{-2}': out });
+  test('git switch - to a protected branch is resolved and denied', () => assert.equal(check('git switch - && git commit -m "x"', { exec: prev('main\n') }), 'deny'));
+  test('git checkout - to a task branch is resolved and allowed', () => assert.equal(check('git checkout - && git commit -m "x"', { branch: 'main', exec: prev('feature/y') }), 'allow'));
+  test('git checkout @{-2} is resolved', () => assert.equal(check('git checkout @{-2} && git merge feature/x', { exec: prev('test') }), 'deny'));
+  test('unresolvable previous branch makes the state unknown', () => assert.equal(check('git switch - && git commit -m "x"'), 'ask'));
+  test('a named switch after an unknown one is known again', () => assert.equal(check('git switch - && git switch feature/z && git commit -m "x"'), 'allow'));
 });
 cases('commands targeting protected names denied', 'deny', [
   'git branch -D main',
@@ -253,6 +270,14 @@ describe('gh pr merge', () => {
     assert.equal(check(MERGE, { exec }), 'allow');
     assert.deepEqual(exec.calls.length, 1);
   });
+  test('leading gh --repo does not hide merge flags', () => assert.equal(check('gh --repo acme/app pr merge 12 --admin --auto', { exec: ghOk() }), 'deny'));
+  test('leading -R repo is used for the lookups', () => {
+    const exec = ghOk({ 'gh api repos/other/repo/commits/abc123/status': status('success'), 'gh api repos/other/repo/branches/dev --jq .commit.sha': 'def456' });
+    assert.equal(check(`gh -R other/repo ${MERGE.slice(3)}`, { exec }), 'allow');
+    assert.ok(exec.calls.some((c) => c.includes('--repo other/repo')));
+    assert.ok(!exec.calls.some((c) => c.startsWith('gh repo view')));
+  });
+  test('leading --hostname does not hide admin commands', () => assert.equal(check('gh --hostname github.example.test secret set X'), 'deny'));
   test('an exhausted time budget denies', () => {
     const v = evaluateBash(MERGE, { cwd: root, config, exec: ghOk(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {}, budgetMs: -1 });
     assert.equal(v.decision, 'deny');

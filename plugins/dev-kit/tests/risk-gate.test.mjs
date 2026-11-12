@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { LOCK_FRESH_MS, LOCK_MAX_AGE_MS, acquireLock, gateLockPath, lockIsStale, resolveSteps, runGate } from '../scripts/gate.mjs';
+import { LOCK_FRESH_MS, LOCK_MAX_AGE_MS, acquireLock, gateLockPath, lockIsStale, reclaimStaleLock, resolveSteps, runGate } from '../scripts/gate.mjs';
+import { defaultExec } from '../scripts/lib/config.mjs';
 import { analyzeFiles, analyzeRisk, parseAddedLines } from '../scripts/risk.mjs';
 import { PROJECT, configFor, exitError, git, initRepo, mockExec, write } from './helpers.mjs';
 
@@ -205,6 +206,48 @@ describe('gate --post-status', () => {
     assert.match(logs.join('\n'), /zero steps executed/);
     assert.equal(gh.calls.length, 0);
   });
+  test('a failed git status before the steps refuses to post', async () => {
+    const root = pushedRepo(base);
+    const gh = ghMock();
+    const logs = [];
+    const exec = (f, a, o) => {
+      if (a[0] === 'status') throw exitError(128);
+      return defaultExec(f, a, o);
+    };
+    const code = await runGate({ tier: 'T2', postStatus: true, base: 'origin/dev' }, { cwd: root, exec, gh, log: (m) => logs.push(m), lockPath });
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /git status failed/);
+    assert.equal(gh.calls.length, 0);
+  });
+  test('a failed git status after the steps refuses to post', async () => {
+    const root = pushedRepo(base);
+    const gh = ghMock();
+    const logs = [];
+    let statusCalls = 0;
+    const exec = (f, a, o) => {
+      if (a[0] === 'status' && ++statusCalls > 1) throw exitError(128);
+      return defaultExec(f, a, o);
+    };
+    const code = await runGate({ tier: 'T2', postStatus: true, base: 'origin/dev' }, { cwd: root, exec, gh, log: (m) => logs.push(m), lockPath });
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /git status failed after the steps/);
+    assert.equal(gh.calls.length, 0);
+  });
+  test('config and step selection are reloaded after waiting for the lock', async () => {
+    const root = pushedRepo(base);
+    const waitLock = path.join(os.tmpdir(), `devkit-gate-wait-${process.pid}.lock`);
+    fs.writeFileSync(waitLock, JSON.stringify({ pid: process.pid, host: os.hostname(), started: new Date().toISOString(), token: 'held' }));
+    const logs = [];
+    const running = runGate({ tier: 'T2', base: 'origin/dev' }, { cwd: root, log: (m) => logs.push(m), lockPath: waitLock, lockPollMs: 20 });
+    await new Promise((r) => setTimeout(r, 100));
+    write(root, '.claude/workflow.json', JSON.stringify({ ...base, gate: { steps: [{ name: 'reloaded', run: 'node -e "0"' }] } }));
+    fs.unlinkSync(waitLock);
+    const code = await running;
+    assert.equal(code, 0, logs.join('\n'));
+    assert.match(logs.join('\n'), /waiting for gate lock/);
+    assert.match(logs.join('\n'), /PASS reloaded/);
+    assert.doesNotMatch(logs.join('\n'), /PASS lint/);
+  });
   test('posts nothing when the tree changes during the gate', async () => {
     const root = pushedRepo({ ...base, gate: { steps: [{ name: 'dirty', run: 'node -e "require(\'fs\').writeFileSync(\'src/new.ts\', \'x\')"' }] } });
     const gh = ghMock();
@@ -253,6 +296,23 @@ describe('gate lock', () => {
     assert.equal(lockIsStale({ pid: 5, host: 'here' }, LOCK_MAX_AGE_MS + 1, { host: 'here', alive }), true);
   });
   test('the lock is machine-wide', () => assert.equal(path.basename(gateLockPath()), 'dev-kit-gate.lock'));
+  test('reclaim removes a lock whose content is unchanged', () => {
+    const lock = path.join(os.tmpdir(), `devkit-lock-test5-${process.pid}.lock`);
+    const stale = JSON.stringify({ pid: 999999999, host: os.hostname(), token: 'old' });
+    fs.writeFileSync(lock, stale);
+    assert.equal(reclaimStaleLock(lock, stale), true);
+    assert.equal(fs.existsSync(lock), false);
+  });
+  test('reclaim never removes a replacement owner lock', () => {
+    const lock = path.join(os.tmpdir(), `devkit-lock-test6-${process.pid}.lock`);
+    const stale = JSON.stringify({ pid: 999999999, host: os.hostname(), token: 'old' });
+    const fresh = JSON.stringify({ pid: process.pid, host: os.hostname(), token: 'new' });
+    fs.writeFileSync(lock, fresh);
+    assert.equal(reclaimStaleLock(lock, stale), false);
+    assert.equal(fs.readFileSync(lock, 'utf8'), fresh);
+    fs.unlinkSync(lock);
+    assert.deepEqual(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(`devkit-lock-test6-${process.pid}.lock.stale`)), []);
+  });
   test('a live lock makes the caller wait and then time out', async () => {
     const lock = path.join(os.tmpdir(), `devkit-lock-test2-${process.pid}.lock`);
     fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, host: os.hostname() }));

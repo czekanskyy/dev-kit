@@ -237,7 +237,7 @@ function evalGit(cmd, ctx, state, out) {
     if (d === null) otherDir = true;
     else gitCwd = toAbsolute(d, gitCwd);
   }
-  const known = !otherDir && sameRepo(gitCwd, ctx);
+  const known = !otherDir && !state.branchUnknown && sameRepo(gitCwd, ctx);
   let current = null;
   if (known) current = state.branch !== undefined ? state.branch : ctx.branchAt(gitCwd);
   const isProt = (b) => b != null && br.protected.has(shortRef(b));
@@ -258,7 +258,11 @@ function evalGit(cmd, ctx, state, out) {
     sub === 'branch' && args.some((a) => /^-[a-zA-Z]*[DdfMmCc]/.test(a) || ['--delete', '--force', '--move', '--copy'].includes(a));
   const checkoutForce = (sub === 'checkout' && args.some((a) => /^-[a-zA-Z]*B/.test(a))) || (sub === 'switch' && args.some((a) => /^-[a-zA-Z]*C/.test(a)));
   if (!known && !abortLike && (STATE_CHANGING_GIT.has(sub) || branchDestructive || checkoutForce)) {
-    ask(`git ${sub} runs in another directory or repository (${gitCwd}), whose current branch cannot be checked. Confirm the target branch is not protected.`);
+    ask(
+      state.branchUnknown && !otherDir
+        ? `git ${sub} runs after a switch to a previous branch (- or @{-N}) that could not be resolved, so the current branch is unknown. Confirm it is not protected.`
+        : `git ${sub} runs in another directory or repository (${gitCwd}), whose current branch cannot be checked. Confirm the target branch is not protected.`,
+    );
   }
 
   switch (sub) {
@@ -300,8 +304,18 @@ function evalGit(cmd, ctx, state, out) {
     case 'pull': {
       if (!onProtected || abortLike) break;
       const o = parseOpts(args, { short: 'sXoj', long: ['strategy', 'strategy-option', 'depth', 'deepen', 'shallow-since', 'shallow-exclude', 'upload-pack', 'jobs', 'recurse-submodules'] });
+      // The last of --ff-only / --ff / --no-ff wins in git; any rebase option overrides fast-forward-only.
+      let ffMode = null;
+      let rebase = false;
+      for (const a of args) {
+        if (a === '--') break;
+        if (a === '--ff-only') ffMode = 'only';
+        else if (a === '--ff' || a === '--no-ff') ffMode = a;
+        else if (/^--(no-)?rebase(=.*)?$/.test(a) || (/^-[a-zA-Z]+$/.test(a) && a.includes('r'))) rebase = true;
+      }
       if (o.pos.length >= 2) deny(`git pull with an explicit refspec on protected branch "${current}" refused. Use git pull --ff-only, or work on a task branch.`);
-      else if (!o.flags.has('ff-only')) deny(`git pull on protected branch "${current}" refused without --ff-only: it could create a local merge commit. Use git pull --ff-only.`);
+      else if (rebase) deny(`git pull with a rebase option on protected branch "${current}" refused. Use plain git pull --ff-only.`);
+      else if (ffMode !== 'only') deny(`git pull on protected branch "${current}" refused unless --ff-only is the effective fast-forward option: it could create a local merge commit. Use git pull --ff-only.`);
       break;
     }
     case 'rebase': {
@@ -355,14 +369,23 @@ function evalGit(cmd, ctx, state, out) {
         if (onProtected) deny(protMsg(sub === 'checkout' ? 'checkout -B' : 'switch -C'));
         if (isProt(forceName) || isInteg(forceName)) deny(`git ${sub} ${sub === 'checkout' ? '-B' : '-C'} "${forceName}" refused: it would reset a protected or integration branch.`);
       }
-      if (!known) break;
+      if (otherDir || !sameRepo(gitCwd, ctx)) break;
       // Track the branch this command line switches to, for later commands in the same line.
       const created = (sub === 'checkout' ? o.values.b?.[0] : o.values.c?.[0]) ?? forceName;
-      if (created) state.branch = created;
-      else if (o.pos.length === 1 && !args.includes('--') && !o.flags.has('detach') && !o.flags.has('d')) {
+      if (created) {
+        state.branch = created;
+        state.branchUnknown = false;
+      } else if (o.pos.length === 1 && !args.includes('--') && !o.flags.has('detach') && !o.flags.has('d')) {
         const target = o.pos[0];
-        const isFile = sub === 'checkout' && fs.existsSync(toAbsolute(target, gitCwd));
-        if (!isFile) state.branch = target;
+        const prev = target === '-' ? '@{-1}' : /^@\{-\d+\}$/.test(target) ? target : null;
+        if (prev) {
+          const resolved = resolvePreviousBranch(ctx, gitCwd, prev);
+          state.branch = resolved ?? undefined;
+          state.branchUnknown = resolved === null;
+        } else if (!(sub === 'checkout' && fs.existsSync(toAbsolute(target, gitCwd)))) {
+          state.branch = target;
+          state.branchUnknown = false;
+        }
       }
       break;
     }
@@ -401,6 +424,16 @@ function evalGit(cmd, ctx, state, out) {
       break;
     default:
       break;
+  }
+}
+
+/** Branch name behind @{-N}, or null when it cannot be resolved (or is a detached commit). */
+function resolvePreviousBranch(ctx, cwd, selector) {
+  try {
+    const out = String(ctx.call('git', ['rev-parse', '--abbrev-ref', selector], { cwd })).trim();
+    return out && out !== 'HEAD' ? out : null;
+  } catch {
+    return null;
   }
 }
 
@@ -455,7 +488,6 @@ function evalPush(args, ctx, current, known, gitCwd, out) {
     for (const spec of specs) {
       const plus = spec.startsWith('+');
       const s = plus ? spec.slice(1) : spec;
-      if (s.startsWith('refs/tags/')) continue;
       if (s === ':' || s === '') {
         if (guarded) deny('git push with a matching refspec (":") refused: it pushes every branch with the same name, protected ones included. Push your task branch by name.');
         continue;
@@ -465,6 +497,8 @@ function evalPush(args, ctx, current, known, gitCwd, out) {
       if (del) dst = s;
       else if (idx >= 0) dst = s.slice(idx + 1) || s.slice(0, idx);
       else dst = s === 'HEAD' || s === '@' ? current ?? 'HEAD' : s;
+      // Only the destination decides: a tag source pushed onto a branch is still a branch push.
+      if (dst.startsWith('refs/tags/')) continue;
       targets.push({ dst: shortRef(dst), plus, del: del || idx === 0 });
     }
   }
@@ -502,8 +536,33 @@ function ghJson(ctx, args, cwd) {
   return JSON.parse(ctx.call('gh', args, { cwd }));
 }
 
+/** Removes gh's leading global flags (--repo/-R, --hostname, others) so the command group is found. */
+export function stripGhGlobals(argv) {
+  let repo;
+  let k = 1;
+  while (k < argv.length && argv[k].startsWith('-')) {
+    const a = argv[k];
+    if (a === '--repo' || a === '-R') {
+      repo = argv[k + 1];
+      k += 2;
+    } else if (a.startsWith('--repo=')) {
+      repo = a.slice('--repo='.length);
+      k++;
+    } else if (a.startsWith('-R') && a.length > 2) {
+      repo = a.slice(2);
+      k++;
+    } else if (a === '--hostname') {
+      k += 2;
+    } else {
+      k++;
+    }
+  }
+  return { argv: [argv[0], ...argv.slice(k)], repo };
+}
+
 function evalGh(cmd, ctx, state, out) {
-  const [, group, sub, ...rest] = cmd.argv;
+  const { argv: ghArgv, repo: globalRepo } = stripGhGlobals(cmd.argv);
+  const [, group, sub, ...rest] = ghArgv;
   const deny = (reason) => out.push({ decision: 'deny', reason });
   const ask = (reason) => out.push({ decision: 'ask', reason });
   const config = ctx.config;
@@ -520,11 +579,11 @@ function evalGh(cmd, ctx, state, out) {
     return;
   }
   if (group === 'pr' && sub === 'merge') {
-    evalPrMerge(rest, ctx, state, cmd, out);
+    evalPrMerge(rest, ctx, state, cmd, out, globalRepo);
     return;
   }
   if (group === 'api') {
-    const args = cmd.argv.slice(2);
+    const args = ghArgv.slice(2);
     const o = parseOpts(args, { short: 'XfFHpqt', long: ['method', 'raw-field', 'field', 'header', 'preview', 'jq', 'template', 'input', 'cache', 'hostname'] });
     const endpoint = String(o.pos[0] ?? '').replace(/^https:\/\/api\.github\.com\//, '').replace(/^\//, '');
     const hasFields = ['f', 'F', 'raw-field', 'field', 'input'].some((f) => o.flags.has(f));
@@ -556,7 +615,7 @@ function evalGh(cmd, ctx, state, out) {
   }
 }
 
-function evalPrMerge(args, ctx, state, cmd, out) {
+function evalPrMerge(args, ctx, state, cmd, out, globalRepo) {
   const deny = (reason) => out.push({ decision: 'deny', reason });
   const ask = (reason) => out.push({ decision: 'ask', reason });
   const config = ctx.config;
@@ -569,7 +628,7 @@ function evalPrMerge(args, ctx, state, cmd, out) {
   checkMessage(texts, 'Merge commit text', config, out);
   if (configBroken(ctx, 'gh pr merge', out)) return;
 
-  const repo = o.values.R?.[0] ?? o.values.repo?.[0];
+  const repo = o.values.R?.[0] ?? o.values.repo?.[0] ?? globalRepo;
   const repoArgs = repo ? ['--repo', repo] : [];
   const sel = o.pos[0];
   const cwd = state.cwd;

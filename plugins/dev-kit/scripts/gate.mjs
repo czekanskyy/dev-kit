@@ -97,6 +97,53 @@ export function lockIsStale(holder, ageMs, { host = os.hostname(), alive = pidAl
   return !alive(holder.pid);
 }
 
+/**
+ * Moves a stale lock aside without ever deleting a replacement owner's lock:
+ * the file is renamed only while its content still equals what was judged stale, and if a
+ * replacement slipped in between the check and the rename it is put back. Returns true when reclaimed.
+ */
+export function reclaimStaleLock(lockPath, staleText) {
+  let current;
+  try {
+    current = fs.readFileSync(lockPath, 'utf8');
+  } catch {
+    return false;
+  }
+  if (current !== staleText) return false;
+  const aside = `${lockPath}.stale-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    fs.renameSync(lockPath, aside);
+  } catch {
+    return false;
+  }
+  let moved = null;
+  try {
+    moved = fs.readFileSync(aside, 'utf8');
+  } catch {
+    moved = null;
+  }
+  if (moved !== staleText) {
+    // We moved someone else's fresh lock: put it back unless a new lock already exists.
+    try {
+      fs.linkSync(aside, lockPath);
+    } catch {
+      // a lock exists again; leave it alone
+    }
+    try {
+      fs.unlinkSync(aside);
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+  try {
+    fs.unlinkSync(aside);
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
 /** Takes the exclusive lock file. Returns a release function, or throws after waitMs. */
 export async function acquireLock(lockPath, { waitMs = 60 * 60 * 1000, pollMs = 10000, log = console.log } = {}) {
   const start = Date.now();
@@ -131,22 +178,23 @@ export async function acquireLock(lockPath, { waitMs = 60 * 60 * 1000, pollMs = 
     }
     let holder = null;
     let ageMs = 0;
+    let text = null;
     try {
       const st = fs.statSync(lockPath);
       ageMs = Date.now() - st.mtimeMs;
-      const text = fs.readFileSync(lockPath, 'utf8');
-      holder = text.trim() ? JSON.parse(text) : null;
+      text = fs.readFileSync(lockPath, 'utf8');
+      try {
+        holder = text.trim() ? JSON.parse(text) : null;
+      } catch {
+        holder = null;
+      }
       if (holder?.started) ageMs = Math.max(ageMs, Date.now() - Date.parse(holder.started));
     } catch (err) {
       if (err.code === 'ENOENT') continue;
       holder = null;
     }
-    if (lockIsStale(holder, ageMs)) {
-      try {
-        fs.unlinkSync(lockPath);
-      } catch {
-        // someone else cleaned it up
-      }
+    if (text !== null && lockIsStale(holder, ageMs)) {
+      reclaimStaleLock(lockPath, text);
       continue;
     }
     if (Date.now() - start >= waitMs) throw new Error(`gate lock still held by pid ${holder?.pid ?? 'unknown'} after ${Math.round(waitMs / 60000)} min`);
@@ -198,8 +246,10 @@ function parseArgs(argv) {
   return out;
 }
 
+/** Uncommitted paths (untracked included, gate state excluded), or null when git status fails. */
 function dirtyFiles(root, exec) {
-  const out = gitTry(['status', '--porcelain=v1', '-uall'], { cwd: root, exec }) ?? '';
+  const out = gitTry(['status', '--porcelain=v1', '-uall'], { cwd: root, exec });
+  if (out === null) return null;
   return out
     .split(/\r?\n/)
     .filter(Boolean)
@@ -207,7 +257,7 @@ function dirtyFiles(root, exec) {
     .filter((f) => !f.startsWith('.claude/state/'));
 }
 
-/** Runs the gate. Returns the exit code. deps: { exec, gh (runner for gh calls), log, cwd, lockPath } */
+/** Runs the gate. Returns the exit code. deps: { exec, gh (runner for gh calls), log, cwd, lockPath, lockPollMs } */
 export async function runGate(args, deps = {}) {
   const exec = deps.exec ?? defaultExec;
   const log = deps.log ?? console.log;
@@ -241,14 +291,23 @@ export async function runGate(args, deps = {}) {
   let release = () => {};
   if (config.gate?.exclusive ?? true) {
     try {
-      release = await acquireLock(deps.lockPath ?? gateLockPath(), { log });
+      release = await acquireLock(deps.lockPath ?? gateLockPath(), { log, ...(deps.lockPollMs ? { pollMs: deps.lockPollMs } : {}) });
     } catch (err) {
       log(`gate: ${err.message}`);
       return 1;
     }
   }
   try {
-    return await runLocked({ args, config, root, base, steps, exec, gh: deps.gh ?? exec, log });
+    // Waiting for the lock can take long: reload the config, the diff and the step selection.
+    const fresh = loadConfig(root);
+    const freshBase = args.base ?? defaultBaseRef(fresh);
+    const freshDiff = changedFilesSince(freshBase, { cwd: root, exec });
+    const freshSteps = resolveSteps({ config: fresh, repoRoot: root, changedFiles: freshDiff?.files ?? null, tier: args.tier, only: args.only });
+    if (args.only && !freshSteps.some((s) => s.name === args.only || s.name.endsWith(`: ${args.only}`) || s.run === args.only)) {
+      log(`gate: step "${args.only}" no longer exists after reloading the config.`);
+      return 2;
+    }
+    return await runLocked({ args, config: fresh, root, base: freshBase, steps: freshSteps, exec, gh: deps.gh ?? exec, log });
   } finally {
     release();
   }
@@ -260,6 +319,10 @@ async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
   const branch = currentBranch(root, exec);
   if (args.postStatus) {
     const dirty = dirtyFiles(root, exec);
+    if (dirty === null) {
+      log('gate: refusing --post-status: git status failed, so the working tree cannot be confirmed clean.');
+      return 1;
+    }
     if (dirty.length) {
       log(`gate: refusing --post-status: the working tree has uncommitted changes (${dirty.slice(0, 5).join(', ')}${dirty.length > 5 ? ', ...' : ''}). Commit them so the tested state equals the commit.`);
       return 1;
@@ -300,9 +363,12 @@ async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
   if (!ran.length) log('gate: no steps ran (check gate.steps in .claude/workflow.json)');
 
   let changed = false;
+  let statusFailed = false;
   if (args.postStatus) {
     const sha2 = gitTry(['rev-parse', 'HEAD'], { cwd: root, exec })?.trim() ?? null;
-    changed = sha2 !== sha || dirtyFiles(root, exec).length > 0;
+    const dirtyAfter = dirtyFiles(root, exec);
+    statusFailed = dirtyAfter === null;
+    changed = sha2 !== sha || (dirtyAfter !== null && dirtyAfter.length > 0);
   }
 
   const result = { sha, branch, tier: args.tier, base, ok, treeChanged: changed, steps: results, seconds: Number(((Date.now() - t0) / 1000).toFixed(1)), finishedAt: new Date().toISOString() };
@@ -321,6 +387,10 @@ async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
   }
 
   if (args.postStatus) {
+    if (statusFailed) {
+      log('gate: git status failed after the steps, so the tree cannot be confirmed unchanged; no status posted.');
+      return 1;
+    }
     if (changed) {
       log('gate: tree changed during gate (HEAD moved or files changed); no status posted. Rerun the gate on a stable tree.');
       return 1;
