@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/czekanskyy/dev-kit/schema/workflow.schema.json",
+  "title": "dev-kit project workflow",
+  "description": "Everything project-specific that dev-kit skills, agents and hooks read. Lives at .claude/workflow.json in the project. dev-kit hardcodes nothing that belongs here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "branches", "commands", "gate"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "project": {
+      "type": "string",
+      "description": "Short project name, used in notifications and reports."
+    },
+    "languages": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Language per audience. Codes like 'en', 'pl'.",
+      "properties": {
+        "chat": { "type": "string", "default": "en" },
+        "commits": { "type": "string", "default": "en" },
+        "pullRequests": { "type": "string", "default": "en" },
+        "docs": { "type": "string", "default": "en" }
+      }
+    },
+    "branches": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["integration", "protected"],
+      "properties": {
+        "work": {
+          "type": "string",
+          "description": "Pattern for task branches. Placeholders: {stage}, {slug}.",
+          "default": "{stage}/{slug}"
+        },
+        "hotfix": { "type": "string", "default": "hotfix/{slug}" },
+        "integration": {
+          "type": "string",
+          "description": "Branch the orchestrator may merge into (after the gate)."
+        },
+        "hotfixBase": {
+          "type": "string",
+          "description": "Branch hotfixes target. Defaults to the first protected branch."
+        },
+        "protected": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Branches the agent may open pull requests into but never push, merge, rebase or delete."
+        },
+        "remote": { "type": "string", "default": "origin" }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Current contract stage, used for branch names and commit prefixes.",
+      "properties": {
+        "current": { "type": "string", "examples": ["E08"] },
+        "branchPrefix": { "type": "string", "examples": ["e08"] },
+        "file": { "type": "string", "description": "Doc with the stage schedule." }
+      }
+    },
+    "commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "description": "Subject format. Placeholders: {stage}, {summary}.",
+          "default": "{summary}"
+        },
+        "forbid": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra case-insensitive regexes refused in commit messages and PR titles/bodies, on top of dev-kit's tool-attribution list."
+        },
+        "forbidEmDash": { "type": "boolean", "default": true }
+      }
+    },
+    "pullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "titleFormat": { "type": "string", "default": "{summary}" },
+        "sections": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Body section headings in order, in the pullRequests language."
+        }
+      }
+    },
+    "commands": {
+      "type": "object",
+      "description": "Named shell commands. Keys are referenced by gate, stopCheck and skills. A value may contain {files} (space-separated, quoted paths).",
+      "additionalProperties": { "type": ["string", "null"] },
+      "properties": {
+        "install": { "type": ["string", "null"] },
+        "lint": { "type": ["string", "null"] },
+        "lintFiles": { "type": ["string", "null"] },
+        "typecheck": { "type": ["string", "null"] },
+        "test": { "type": ["string", "null"] },
+        "testFiles": { "type": ["string", "null"] },
+        "build": { "type": ["string", "null"] },
+        "e2e": { "type": ["string", "null"] },
+        "docs": { "type": ["string", "null"] },
+        "outdated": { "type": ["string", "null"] },
+        "audit": { "type": ["string", "null"] }
+      }
+    },
+    "subprojects": {
+      "type": "array",
+      "description": "Folders with their own checks. When a diff touches `path`, their gate steps run too.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "gate"],
+        "properties": {
+          "path": { "type": "string" },
+          "gate": { "type": "array", "items": { "$ref": "#/$defs/gateStep" } }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/gateStep" },
+          "description": "The full local gate, in order. Runs before every merge."
+        },
+        "statusContext": {
+          "type": "string",
+          "default": "local-gate",
+          "description": "Commit status context posted to the forge after a green gate."
+        },
+        "exclusive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only one gate at a time on this machine (heavy builds)."
+        }
+      }
+    },
+    "stopCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Fast checks run when an agent tries to finish with uncommitted code changes.",
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "codeGlobs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "onEdit": {
+      "type": "array",
+      "description": "After an Edit/Write on a matching file, run these commands (formatters, generators) or remind the agent.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["match"],
+        "properties": {
+          "match": { "type": "array", "items": { "type": "string" } },
+          "run": { "type": "array", "items": { "type": "string" } },
+          "remind": { "type": "string" }
+        }
+      }
+    },
+    "riskPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A diff touching these is at least T2 and needs approval before merge.",
+      "properties": {
+        "globs": { "type": "array", "items": { "type": "string" } },
+        "contentPatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regexes matched against added lines of the diff."
+        },
+        "alwaysT3": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plain-language triggers that make a task T3 (e.g. destructive migration)."
+        }
+      }
+    },
+    "tiers": {
+      "type": "object",
+      "description": "Per-tier overrides of dev-kit defaults (see WORKFLOW.md).",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^T[0-3]$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "examples": { "type": "array", "items": { "type": "string" } },
+            "merge": { "enum": ["orchestrator", "ask", "human"] },
+            "e2e": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "description": "Role to model and effort. Keys: orchestrator, explorer, quickFixer, implementer, implementerT3, implementerEscalation, plannerT2, plannerT3, reviewerT1, reviewer, depResearcher, writer.",
+      "additionalProperties": { "$ref": "#/$defs/modelChoice" }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxRounds": { "type": "integer", "minimum": 1, "default": 2 },
+        "securityReviewOnRisk": { "type": "boolean", "default": true },
+        "codex": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Second-family review through the Codex plugin. Review only, never writes code.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "T2risk": { "$ref": "#/$defs/codexChoice" },
+            "T3": { "$ref": "#/$defs/codexChoice" }
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Usage thresholds in percent of the weekly limit, and of the 5-hour window at night.",
+      "properties": {
+        "lowerEffortAt": { "type": "integer", "default": 75 },
+        "warnAt": { "type": "integer", "default": 90 },
+        "stopAt": { "type": "integer", "default": 95 },
+        "nightWindowPauseAt": { "type": "integer", "default": 90 }
+      }
+    },
+    "guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generated": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Globs never edited by hand; regenerate instead."
+        },
+        "immutableOnceMerged": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Globs (e.g. migrations) that may be added but not edited once they exist on the integration or a protected branch."
+        },
+        "secrets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Globs never read. Added to dev-kit's defaults (~/.ssh, gh config, keys)."
+        },
+        "allowRead": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exceptions to secrets, e.g. .env.example."
+        },
+        "denyCommands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra regexes for Bash commands that are always refused."
+        },
+        "askCommands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra regexes for Bash commands that need the user's yes."
+        },
+        "databaseUrlEnv": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["DATABASE_URL"],
+          "description": "Env names holding connection strings; a non-local host in a command is refused."
+        },
+        "localHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["localhost", "127.0.0.1", "::1", "host.docker.internal", "db", "postgres"]
+        },
+        "removableDirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["node_modules", ".next", "dist", "build", "coverage", ".turbo", "tmp", ".cache"],
+          "description": "Directory names rm -rf may target."
+        },
+        "packageManager": {
+          "type": "string",
+          "enum": ["pnpm", "npm", "yarn", "bun"],
+          "default": "pnpm"
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string", "description": "Parent folder for task worktrees, relative to the repo." },
+        "setup": { "type": ["string", "null"], "description": "Command run inside a new worktree. Placeholders: {slot}, {path}." },
+        "teardown": { "type": ["string", "null"] },
+        "sync": { "type": ["string", "null"], "description": "Command run after rebasing onto a fresh integration branch." }
+      }
+    },
+    "docs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "map": { "type": "string" },
+        "log": { "type": "string" },
+        "check": { "type": ["string", "null"], "description": "Command name from commands, or a shell command." },
+        "done": { "type": "string", "description": "Doc or skill with the project's definition of done." },
+        "index": { "type": "array", "items": { "type": "string" }, "description": "Docs every task reads first." }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "specs": { "type": "string", "default": "specs/" },
+        "queue": { "type": "string", "default": "queue/night.md" },
+        "reports": { "type": "string", "default": "reports/" },
+        "handoff": { "type": "string", "default": "queue/handoff.md" }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ntfy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "server": { "type": "string", "description": "Base URL. Personal topic and token come from env." },
+            "topicEnv": { "type": "string", "default": "NTFY_TOPIC" },
+            "tokenEnv": { "type": "string", "default": "NTFY_TOKEN" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gateStep": {
+      "oneOf": [
+        { "type": "string", "description": "Command name from commands, or a shell command." },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run"],
+          "properties": {
+            "name": { "type": "string" },
+            "run": { "type": "string" },
+            "when": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Only when the diff touches one of these globs."
+            },
+            "minTier": { "enum": ["T0", "T1", "T2", "T3"] },
+            "env": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "modelChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model"],
+      "properties": {
+        "model": { "type": "string", "examples": ["haiku", "sonnet", "opus"] },
+        "effort": { "enum": ["low", "medium", "high", "xhigh", "max"] }
+      }
+    },
+    "codexChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string" },
+        "effort": { "enum": ["low", "medium", "high", "xhigh"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "languages": { "chat": "en", "commits": "en", "pullRequests": "en", "docs": "en" },
+  "branches": { "work": "{stage}/{slug}", "hotfix": "hotfix/{slug}", "remote": "origin" },
+  "commit": { "format": "{summary}", "forbid": [], "forbidEmDash": true },
+  "pullRequest": {
+    "titleFormat": "{summary}",
+    "sections": ["What", "Why", "How it was checked", "Risk and migrations", "Assumptions"]
+  },
+  "gate": { "statusContext": "local-gate", "exclusive": true },
+  "tiers": {
+    "T0": { "merge": "orchestrator", "e2e": false },
+    "T1": { "merge": "orchestrator", "e2e": false },
+    "T2": { "merge": "orchestrator", "e2e": true },
+    "T3": { "merge": "ask", "e2e": true }
+  },
+  "models": {
+    "orchestrator": { "model": "sonnet", "effort": "medium" },
+    "explorer": { "model": "haiku" },
+    "quickFixer": { "model": "haiku", "effort": "low" },
+    "implementer": { "model": "sonnet", "effort": "medium" },
+    "implementerT3": { "model": "sonnet", "effort": "high" },
+    "implementerEscalation": { "model": "opus", "effort": "high" },
+    "plannerT2": { "model": "sonnet", "effort": "high" },
+    "plannerT3": { "model": "opus", "effort": "high" },
+    "reviewerT1": { "model": "sonnet", "effort": "high" },
+    "reviewer": { "model": "opus", "effort": "high" },
+    "depResearcher": { "model": "haiku" },
+    "writer": { "model": "haiku" }
+  },
+  "review": {
+    "maxRounds": 2,
+    "securityReviewOnRisk": true,
+    "codex": { "enabled": true, "T2risk": { "effort": "high" }, "T3": { "effort": "high" } }
+  },
+  "limits": { "lowerEffortAt": 75, "warnAt": 90, "stopAt": 95, "nightWindowPauseAt": 90 },
+  "guard": {
+    "generated": [],
+    "immutableOnceMerged": [],
+    "secrets": [
+      "**/.env",
+      "**/.env.local",
+      "**/.env.*.local",
+      "**/.env.production",
+      "**/.env.development",
+      "**/.env.test",
+      "~/.ssh/**",
+      "~/.config/gh/**",
+      "~/.aws/**",
+      "~/.netrc",
+      "~/.npmrc",
+      "**/*.pem",
+      "**/*.key",
+      "**/id_rsa*",
+      "**/id_ed25519*"
+    ],
+    "allowRead": ["**/.env.example", "**/.env.sample", "**/.env.template"],
+    "denyCommands": [],
+    "askCommands": [],
+    "databaseUrlEnv": ["DATABASE_URL"],
+    "localHosts": ["localhost", "127.0.0.1", "::1", "host.docker.internal", "db", "postgres"],
+    "removableDirs": ["node_modules", ".next", "dist", "build", "coverage", ".turbo", "tmp", ".cache"],
+    "packageManager": "pnpm"
+  },
+  "paths": {
+    "specs": "specs/",
+    "queue": "queue/night.md",
+    "reports": "reports/",
+    "handoff": "queue/handoff.md"
+  },
+  "notify": { "ntfy": { "topicEnv": "NTFY_TOPIC", "tokenEnv": "NTFY_TOKEN" } }
+}

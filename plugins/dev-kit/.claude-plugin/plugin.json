@@ -1,0 +1,13 @@
+{
+  "name": "dev-kit",
+  "version": "0.1.0",
+  "description": "Tiered task workflow for Claude Code: triage, quick fixes, build tasks, independent review, local merge gate and guard hooks, all driven by a per-project .claude/workflow.json.",
+  "author": {
+    "name": "Dominik Czekański",
+    "url": "https://github.com/czekanskyy"
+  },
+  "homepage": "https://github.com/czekanskyy/dev-kit",
+  "repository": "https://github.com/czekanskyy/dev-kit",
+  "license": "MIT",
+  "keywords": ["workflow", "orchestration", "code-review", "git", "hooks", "quality-gate", "agents"]
+}

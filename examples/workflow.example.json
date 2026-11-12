@@ -1,0 +1,170 @@
+{
+  "$schema": "https://raw.githubusercontent.com/czekanskyy/dev-kit/main/plugins/dev-kit/schema/workflow.schema.json",
+  "project": "acme-store",
+  "languages": {
+    "chat": "en",
+    "commits": "en",
+    "pullRequests": "en",
+    "docs": "en"
+  },
+  "branches": {
+    "work": "{stage}/{slug}",
+    "hotfix": "hotfix/{slug}",
+    "integration": "dev",
+    "hotfixBase": "staging",
+    "protected": ["staging", "main"],
+    "remote": "origin"
+  },
+  "stage": {
+    "current": "M3",
+    "branchPrefix": "m3",
+    "file": "docs/stages.md"
+  },
+  "commit": {
+    "format": "[{stage}] {summary}",
+    "forbid": ["\\bwip\\b"],
+    "forbidEmDash": true
+  },
+  "pullRequest": {
+    "titleFormat": "[{stage}] {summary}",
+    "sections": ["What", "Why", "How it was checked", "Risk and migrations", "Assumptions"]
+  },
+  "commands": {
+    "install": "pnpm install --frozen-lockfile",
+    "lint": "pnpm lint",
+    "lintFiles": "pnpm exec eslint {files}",
+    "typecheck": "pnpm exec tsc --noEmit",
+    "test": "pnpm test",
+    "testFiles": "pnpm exec vitest run {files}",
+    "build": "pnpm build",
+    "e2e": "pnpm exec playwright test",
+    "docs": "pnpm check:docs",
+    "migrate": "pnpm payload migrate",
+    "generate": "pnpm payload generate:types && pnpm payload generate:importmap",
+    "outdated": "pnpm outdated --format json",
+    "audit": "pnpm audit --json"
+  },
+  "gate": {
+    "steps": [
+      "docs",
+      "install",
+      "lint",
+      "typecheck",
+      "test",
+      { "name": "migrate on a fresh database", "run": "pnpm db:fresh-check", "when": ["src/migrations/**", "src/collections/**"] },
+      "build",
+      { "name": "e2e", "run": "pnpm exec playwright test", "minTier": "T2" }
+    ],
+    "statusContext": "local-gate",
+    "exclusive": true
+  },
+  "subprojects": [
+    {
+      "path": "packages/ui/",
+      "gate": [
+        { "name": "ui tests", "run": "pnpm --filter @acme/ui test" },
+        { "name": "ui build", "run": "pnpm --filter @acme/ui build" }
+      ]
+    }
+  ],
+  "stopCheck": {
+    "commands": ["pnpm exec eslint {files}", "pnpm exec tsc --noEmit"],
+    "codeGlobs": ["src/**/*.ts", "src/**/*.tsx"]
+  },
+  "onEdit": [
+    {
+      "match": ["src/collections/**", "src/globals/**", "src/payload.config.ts"],
+      "remind": "Schema changed: run the generate command and create a migration with pnpm payload migrate:create."
+    },
+    {
+      "match": ["**/*.ts", "**/*.tsx"],
+      "run": ["pnpm exec prettier --write {files}"]
+    }
+  ],
+  "riskPaths": {
+    "globs": [
+      "src/access/**",
+      "src/collections/**",
+      "src/globals/**",
+      "src/migrations/**",
+      "src/payload.config.ts",
+      "src/middleware.ts",
+      "src/app/api/**",
+      "**/route.ts",
+      "src/lib/auth/**",
+      "src/lib/payments/**",
+      "package.json",
+      "pnpm-lock.yaml",
+      ".github/**",
+      "Dockerfile",
+      "next.config.ts",
+      ".env.example"
+    ],
+    "contentPatterns": ["process\\.env", "NEXT_PUBLIC_", "[\"']use server[\"']"],
+    "alwaysT3": [
+      "destructive migration: dropping a field or collection, or changing a field type",
+      "checkout or payment flow",
+      "authentication or role model redesign"
+    ]
+  },
+  "tiers": {
+    "T0": { "examples": ["copy change", "colour or spacing", "typo", "translation string"] },
+    "T1": { "examples": ["bug fix", "small component", "form field without schema change"] },
+    "T2": { "examples": ["new page section", "new collection field with migration", "third-party integration"], "e2e": true },
+    "T3": { "examples": ["checkout", "page builder", "architecture change"], "merge": "ask" }
+  },
+  "models": {
+    "orchestrator": { "model": "sonnet", "effort": "medium" },
+    "implementer": { "model": "sonnet", "effort": "medium" },
+    "reviewer": { "model": "opus", "effort": "high" }
+  },
+  "review": {
+    "maxRounds": 2,
+    "securityReviewOnRisk": true,
+    "codex": {
+      "enabled": true,
+      "T2risk": { "effort": "high" },
+      "T3": { "effort": "high" }
+    }
+  },
+  "limits": {
+    "lowerEffortAt": 75,
+    "warnAt": 90,
+    "stopAt": 95
+  },
+  "guard": {
+    "generated": ["src/payload-types.ts", "src/app/(payload)/admin/importMap.js"],
+    "immutableOnceMerged": ["src/migrations/*.ts", "src/migrations/*.json"],
+    "secrets": ["deploy/secrets/**"],
+    "denyCommands": ["docker\\s+compose\\s+down\\s+.*-v", "migrate:(fresh|reset|down)"],
+    "askCommands": ["docker\\s+volume\\s+rm"],
+    "databaseUrlEnv": ["DATABASE_URL"],
+    "packageManager": "pnpm"
+  },
+  "worktree": {
+    "root": "../acme-store-worktrees",
+    "setup": "node scripts/worktree-setup.mjs --slot {slot} --path {path}",
+    "teardown": "node scripts/worktree-teardown.mjs --slot {slot}",
+    "sync": "pnpm install --frozen-lockfile && pnpm payload migrate"
+  },
+  "docs": {
+    "map": "docs/map.md",
+    "log": "docs/log.md",
+    "check": "docs",
+    "done": "docs/definition-of-done.md",
+    "index": ["CLAUDE.md", "docs/map.md", "docs/conventions.md"]
+  },
+  "paths": {
+    "specs": "specs/",
+    "queue": "queue/night.md",
+    "reports": "reports/",
+    "handoff": "queue/handoff.md"
+  },
+  "notify": {
+    "ntfy": {
+      "server": "https://ntfy.example.com",
+      "topicEnv": "NTFY_TOPIC",
+      "tokenEnv": "NTFY_TOKEN"
+    }
+  }
+}
