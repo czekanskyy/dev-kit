@@ -24,7 +24,8 @@ export function parseCommandLine(input, opts = {}) {
   const depth = opts.depth ?? 0;
   const state = opts.state ?? { pipeline: 0 };
   const rawCmds = [];
-  lex(String(input ?? ''), 0, false, rawCmds, depth, state);
+  const ps = opts.dialect === 'powershell';
+  lex(String(input ?? ''), 0, false, rawCmds, depth, state, ps);
   const out = [];
   for (const rc of rawCmds) {
     for (const c of finalize(rc, state)) out.push(c);
@@ -32,7 +33,8 @@ export function parseCommandLine(input, opts = {}) {
   return out;
 }
 
-function lex(src, pos, stopAtParen, out, depth, state) {
+// ps: PowerShell (and cmd) quoting: backslash is literal, backtick escapes, '' inside single quotes.
+function lex(src, pos, stopAtParen, out, depth, state, ps = false) {
   let i = pos;
   let cmd = newCmd(i);
   let word = null;
@@ -43,7 +45,7 @@ function lex(src, pos, stopAtParen, out, depth, state) {
   let pipeIndex = 0;
 
   function newCmd(start) {
-    return { words: [], redirects: [], heredoc: null, herestring: null, start, depth };
+    return { words: [], redirects: [], heredoc: null, herestring: null, start, depth, ps };
   }
   function startWord() {
     if (!word) word = { value: '', start: i, quoted: false };
@@ -100,7 +102,7 @@ function lex(src, pos, stopAtParen, out, depth, state) {
   }
   function substitution(startIdx, innerStart) {
     // $( ... ) or <( ... ): parse the inside recursively, return the index after ')'.
-    const end = lex(src, innerStart, true, out, depth + 1, state);
+    const end = lex(src, innerStart, true, out, depth + 1, state, ps);
     word.value += src.slice(startIdx, Math.min(end + 1, src.length));
     return end + 1;
   }
@@ -137,6 +139,72 @@ function lex(src, pos, stopAtParen, out, depth, state) {
 
   while (i < src.length) {
     const c = src[i];
+    if (ps) {
+      if (c === '`') {
+        if (src[i + 1] === '\n') {
+          i += 2;
+          continue;
+        }
+        if (src[i + 1] === '\r' && src[i + 2] === '\n') {
+          i += 3;
+          continue;
+        }
+        startWord();
+        word.value += src[i + 1] ?? '';
+        word.quoted = true;
+        i += 2;
+        continue;
+      }
+      if (c === '\\') {
+        startWord();
+        word.value += c;
+        i++;
+        continue;
+      }
+      if (c === "'") {
+        startWord();
+        word.quoted = true;
+        let j = i + 1;
+        for (;;) {
+          const k = src.indexOf("'", j);
+          if (k < 0) {
+            word.value += src.slice(j);
+            i = src.length;
+            break;
+          }
+          word.value += src.slice(j, k);
+          if (src[k + 1] === "'") {
+            word.value += "'";
+            j = k + 2;
+            continue;
+          }
+          i = k + 1;
+          break;
+        }
+        continue;
+      }
+      if (c === '"') {
+        startWord();
+        word.quoted = true;
+        i++;
+        while (i < src.length && src[i] !== '"') {
+          const d = src[i];
+          if (d === '`' && i + 1 < src.length) {
+            word.value += src[i + 1];
+            i += 2;
+            continue;
+          }
+          if (d === '$' && src[i + 1] === '(') {
+            i = substitution(i, i + 2);
+            continue;
+          }
+          word.value += d;
+          i++;
+        }
+        i++;
+        continue;
+      }
+    }
     if (c === '\\') {
       if (src[i + 1] === '\n') {
         i += 2;
@@ -487,14 +555,35 @@ function finalize(rc, state) {
     pipeline: rc.pipeline,
     pipeIndex: rc.pipeIndex,
     depth: rc.depth,
+    dialect: rc.ps ? 'powershell' : 'bash',
   };
   const result = [cmd];
   const depth = rc.depth + 1;
   if (depth > MAX_DEPTH || argv.length === 0) return result;
-  const sub = (text) => parseCommandLine(text, { depth, state });
+  const sub = (text, dialect = 'bash') => parseCommandLine(text, { depth, state, dialect });
   const b = baseName(argv[0]);
 
-  if (SHELLS.has(b)) {
+  if (b === 'pwsh' || b === 'powershell') {
+    for (let k = 1; k < argv.length; k++) {
+      const a = argv[k].toLowerCase();
+      if (/^[-/](c|co|com|comm|comma|comman|command)$/.test(a)) {
+        result.push(...sub(argv.slice(k + 1).join(' '), 'powershell'));
+        break;
+      }
+      if (/^[-/](e|ec|en|enc|encodedcommand|encoded)$/.test(a) || a.startsWith('-encodedc')) {
+        try {
+          result.push(...sub(Buffer.from(argv[k + 1] ?? '', 'base64').toString('utf16le'), 'powershell'));
+        } catch {
+          // undecodable: nothing more to inspect
+        }
+        break;
+      }
+      if (/^[-/](file|f)$/.test(a)) break;
+    }
+  } else if (b === 'cmd') {
+    const k = argv.findIndex((a, idx) => idx > 0 && /^\/[ck]$/i.test(a));
+    if (k > 0) result.push(...sub(argv.slice(k + 1).join(' '), 'powershell'));
+  } else if (SHELLS.has(b)) {
     let script = null;
     let hasPositional = false;
     for (let k = 1; k < argv.length; k++) {

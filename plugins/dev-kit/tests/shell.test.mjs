@@ -89,3 +89,18 @@ test('parseOpts handles clusters, values and --', () => {
   assert.deepEqual(o.values.file, ['x']);
   assert.deepEqual(o.pos, ['-y']);
 });
+
+test('PowerShell dialect: backslash is literal, backtick escapes, doubled single quotes', () => {
+  const ps = (s) => parseCommandLine(s, { dialect: 'powershell' }).map((c) => c.argv);
+  assert.deepEqual(ps(String.raw`Remove-Item C:\temp\x -Recurse; Get-Content 'it''s.txt'`), [
+    ['Remove-Item', String.raw`C:\temp\x`, '-Recurse'],
+    ['Get-Content', "it's.txt"],
+  ]);
+  assert.deepEqual(ps('Write-Output "a`"b" | Out-Null'), [['Write-Output', 'a"b'], ['Out-Null']]);
+  assert.equal(parseCommandLine('git status', { dialect: 'powershell' })[0].dialect, 'powershell');
+});
+
+test('pwsh -Command and cmd /c are inspected in the PowerShell dialect', () => {
+  assert.ok(argvs(String.raw`pwsh -NoProfile -Command "Remove-Item C:\data -Recurse"`).some((x) => x[0] === 'Remove-Item'));
+  assert.ok(argvs('cmd /c "rd /s /q build"').some((x) => x.join(' ') === 'rd /s /q build'));
+});

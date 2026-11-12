@@ -1,17 +1,44 @@
 {
-  "description": "dev-kit guards: refuses dangerous shell commands and secret reads, runs project checks after edits and before stopping, and sends phone notifications.",
+  "description": "dev-kit guards: refuses dangerous shell and PowerShell commands and secret reads, runs project checks after edits and before stopping, and sends phone notifications.",
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard-bash.mjs"], "timeout": 30 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/guard-bash.mjs"
+            ],
+            "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/guard-bash.mjs"
+            ],
+            "timeout": 120
+          }
         ]
       },
       {
         "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob",
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard-files.mjs"], "timeout": 30 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/guard-files.mjs"
+            ],
+            "timeout": 30
+          }
         ]
       }
     ],
@@ -19,21 +46,42 @@
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/post-edit.mjs"], "timeout": 600 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/post-edit.mjs"
+            ],
+            "timeout": 600
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/stop-check.mjs"], "timeout": 900 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/stop-check.mjs"
+            ],
+            "timeout": 900
+          }
         ]
       }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/stop-check.mjs"], "timeout": 900 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/stop-check.mjs"
+            ],
+            "timeout": 900
+          }
         ]
       }
     ],
@@ -41,14 +89,28 @@
       {
         "matcher": "permission_prompt|idle_prompt|agent_needs_input|elicitation_dialog",
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/notify-hook.mjs"], "timeout": 10 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/notify-hook.mjs"
+            ],
+            "timeout": 10
+          }
         ]
       }
     ],
     "StopFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/notify-hook.mjs"], "timeout": 10 }
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/notify-hook.mjs"
+            ],
+            "timeout": 10
+          }
         ]
       }
     ]

@@ -18,17 +18,35 @@ function kindOf(input) {
     .toLowerCase();
 }
 
-/** Builds the notification for a hook input, or null when nothing should be sent. */
+const SUMMARIES = {
+  permission_prompt: 'Permission prompt waiting',
+  agent_needs_input: 'Agent needs your decision',
+  elicitation_dialog: 'Agent needs your decision',
+  idle_prompt: 'Agent is waiting for you',
+};
+
+/** The error kind as a bare identifier (never free text from the hook input). */
+function failureKind(input) {
+  for (const v of [input.matcher, input.error_type, input.error, input.reason, input.stop_reason, input.type]) {
+    if (typeof v === 'string' && /^[a-z_]{1,40}$/.test(v)) return v;
+  }
+  return 'unknown';
+}
+
+/**
+ * Builds the notification for a hook input, or null when nothing should be sent.
+ * Only fixed summaries and the project name are sent: never hook message text, commands, paths or error text.
+ */
 export function buildNotification(input, project) {
   const event = input?.hook_event_name;
   const kind = kindOf(input ?? {});
-  const name = project || 'Claude Code';
+  const title = project || 'Claude Code';
   if (event === 'StopFailure') {
     const limit = LIMIT_FAILURES.find((k) => kind.includes(k));
     return {
       priority: 'max',
-      title: `${name}: ${limit ? 'limit reached' : 'session stopped'}`,
-      message: limit ? `Usage limit reached (${limit}). Work is paused.` : `The session stopped on an error${kind ? ` (${kind.slice(0, 60)})` : ''}.`,
+      title,
+      message: limit ? 'Usage limit reached' : `Agent stopped with an error: ${failureKind(input)}`,
       tags: limit ? 'hourglass' : 'warning',
     };
   }
@@ -36,13 +54,7 @@ export function buildNotification(input, project) {
     const type = [...URGENT_NOTIFICATIONS, ...QUIET_NOTIFICATIONS].find((t) => kind.includes(t));
     if (!type) return null;
     const urgent = URGENT_NOTIFICATIONS.has(type);
-    const label = { permission_prompt: 'needs permission', agent_needs_input: 'needs input', elicitation_dialog: 'has a question', idle_prompt: 'waiting for you' }[type];
-    return {
-      priority: urgent ? 'max' : 'low',
-      title: `${name}: ${label}`,
-      message: String(input.message ?? label),
-      tags: urgent ? 'warning' : 'zzz',
-    };
+    return { priority: urgent ? 'max' : 'low', title, message: SUMMARIES[type], tags: urgent ? 'warning' : 'zzz' };
   }
   return null;
 }

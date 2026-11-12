@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { acquireLock, resolveSteps } from '../scripts/gate.mjs';
+import { LOCK_FRESH_MS, LOCK_MAX_AGE_MS, acquireLock, gateLockPath, lockIsStale, resolveSteps, runGate } from '../scripts/gate.mjs';
 import { analyzeFiles, analyzeRisk, parseAddedLines } from '../scripts/risk.mjs';
-import { PROJECT, configFor, git, initRepo, write } from './helpers.mjs';
+import { PROJECT, configFor, exitError, git, initRepo, mockExec, write } from './helpers.mjs';
 
 const SCRIPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts');
 
@@ -55,7 +55,25 @@ describe('risk on a real git repo', () => {
     const r = analyzeFiles({ config: configFor(root), files: ['README.md'], repoRoot: root });
     assert.equal(r.touchesRisk, false);
   });
-  test('unknown base fails clearly', () => assert.throws(() => analyzeRisk({ cwd: root, base: 'nope/nope' }), /merge base/));
+  test('unknown base returns touchesRisk null with an error', () => {
+    const r = analyzeRisk({ cwd: root, base: 'nope/nope' });
+    assert.equal(r.touchesRisk, null);
+    assert.match(r.error, /merge base/);
+  });
+  test('PR mode: a failed diff returns touchesRisk null', () => {
+    const exec = mockExec({ 'gh pr diff': exitError(1) });
+    const r = analyzeRisk({ cwd: root, config: configFor(root), pr: 5, prFiles: ['src/app.ts'], baseRefName: 'dev', exec });
+    assert.equal(r.touchesRisk, null);
+    assert.match(r.error, /gh pr diff/);
+  });
+  test('PR mode: a failed view returns touchesRisk null', () => {
+    const r = analyzeRisk({ cwd: root, config: configFor(root), pr: 5, exec: mockExec({}) });
+    assert.equal(r.touchesRisk, null);
+  });
+  test('CLI exits 2 when the analysis is unavailable', () => {
+    const r = spawnSync(process.execPath, [path.join(SCRIPTS, 'risk.mjs'), '--base', 'nope/nope'], { cwd: root, encoding: 'utf8' });
+    assert.equal(r.status, 2);
+  });
 });
 
 describe('gate step selection', () => {
@@ -121,6 +139,81 @@ describe('gate CLI', () => {
     assert.equal(r.status, 1);
     assert.match(r.stdout, /not on any remote branch/);
   });
+  test('--post-status with --only is refused', () => {
+    const r = gate('--post-status', '--only', 'lint');
+    assert.equal(r.status, 2);
+    assert.match(r.stdout, /--only/);
+  });
+  test('an unknown --only name is rejected', () => {
+    const r = gate('--only', 'nope', '--dry-run');
+    assert.equal(r.status, 2);
+    assert.match(r.stdout, /unknown step "nope"/);
+  });
+  test('a known --only name runs just that step', () => {
+    const r = gate('--only', 'lint');
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /PASS lint/);
+    assert.doesNotMatch(r.stdout, /PASS test/);
+  });
+});
+
+describe('gate --post-status', () => {
+  // A repo with a bare remote, so `git branch -r --contains` finds the pushed commit.
+  function pushedRepo(project) {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-remote-'));
+    git(remote, 'init', '-q', '--bare');
+    const root = initRepo();
+    write(root, '.claude/workflow.json', JSON.stringify(project));
+    write(root, '.gitignore', '.claude/state/\n');
+    write(root, 'src/app.ts', '1\n');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'init');
+    git(root, 'remote', 'add', 'origin', remote);
+    git(root, 'push', '-q', '-u', 'origin', 'dev');
+    return root;
+  }
+  const base = { ...PROJECT, subprojects: [], gate: { steps: ['lint', 'test'], statusContext: 'local-gate' } };
+  const lockPath = path.join(os.tmpdir(), `devkit-gate-test-${process.pid}.lock`);
+  const ghMock = () => {
+    const calls = [];
+    const fn = (file, args) => {
+      calls.push(args);
+      return args[0] === 'repo' ? JSON.stringify({ nameWithOwner: 'acme/app' }) : '{}';
+    };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test('posts the tier in the status description', async () => {
+    const root = pushedRepo(base);
+    const gh = ghMock();
+    const logs = [];
+    const code = await runGate({ tier: 'T2', postStatus: true, base: 'origin/dev' }, { cwd: root, gh, log: (m) => logs.push(m), lockPath });
+    assert.equal(code, 0, logs.join('\n'));
+    const post = gh.calls.find((a) => a[0] === 'api');
+    assert.ok(post.includes('state=success'));
+    assert.ok(post.includes('description=T2: 2 steps passed locally'));
+    const sha = git(root, 'rev-parse', 'HEAD').trim();
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, '.claude', 'state', 'gate', `${sha}.json`), 'utf8')).tier, 'T2');
+  });
+  test('refuses to post success when zero steps ran', async () => {
+    const root = pushedRepo({ ...base, gate: { steps: [] } });
+    const gh = ghMock();
+    const logs = [];
+    const code = await runGate({ tier: 'T2', postStatus: true, base: 'origin/dev' }, { cwd: root, gh, log: (m) => logs.push(m), lockPath });
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /zero steps executed/);
+    assert.equal(gh.calls.length, 0);
+  });
+  test('posts nothing when the tree changes during the gate', async () => {
+    const root = pushedRepo({ ...base, gate: { steps: [{ name: 'dirty', run: 'node -e "require(\'fs\').writeFileSync(\'src/new.ts\', \'x\')"' }] } });
+    const gh = ghMock();
+    const logs = [];
+    const code = await runGate({ tier: 'T2', postStatus: true, base: 'origin/dev' }, { cwd: root, gh, log: (m) => logs.push(m), lockPath });
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /tree changed during gate/);
+    assert.equal(gh.calls.length, 0);
+  });
 });
 
 describe('gate lock', () => {
@@ -128,10 +221,38 @@ describe('gate lock', () => {
     const lock = path.join(os.tmpdir(), `devkit-lock-test-${process.pid}.lock`);
     fs.writeFileSync(lock, JSON.stringify({ pid: 999999999, host: os.hostname() }));
     const release = await acquireLock(lock, { pollMs: 10, waitMs: 1000, log: () => {} });
-    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+    const owner = JSON.parse(fs.readFileSync(lock, 'utf8'));
+    assert.equal(owner.pid, process.pid);
+    assert.match(owner.token, /^[0-9a-f]{32}$/);
+    assert.ok(owner.started && owner.host);
     release();
     assert.equal(fs.existsSync(lock), false);
   });
+  test('release leaves a lock that another owner took over', async () => {
+    const lock = path.join(os.tmpdir(), `devkit-lock-test3-${process.pid}.lock`);
+    const release = await acquireLock(lock, { pollMs: 10, waitMs: 1000, log: () => {} });
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, host: os.hostname(), token: 'someone-else' }));
+    release();
+    assert.equal(fs.existsSync(lock), true);
+    fs.unlinkSync(lock);
+  });
+  test('an empty fresh lock counts as live', async () => {
+    const lock = path.join(os.tmpdir(), `devkit-lock-test4-${process.pid}.lock`);
+    fs.writeFileSync(lock, '');
+    await assert.rejects(acquireLock(lock, { pollMs: 10, waitMs: 50, log: () => {} }), /still held/);
+    fs.unlinkSync(lock);
+  });
+  test('staleness rules', () => {
+    const alive = () => true;
+    const dead = () => false;
+    assert.equal(lockIsStale(null, 1000, { alive }), false);
+    assert.equal(lockIsStale(null, LOCK_FRESH_MS + 1, { alive }), true);
+    assert.equal(lockIsStale({ pid: 5, host: 'here' }, 1000, { host: 'here', alive: dead }), true);
+    assert.equal(lockIsStale({ pid: 5, host: 'here' }, 1000, { host: 'here', alive }), false);
+    assert.equal(lockIsStale({ pid: 5, host: 'other' }, 1000, { host: 'here', alive: dead }), false);
+    assert.equal(lockIsStale({ pid: 5, host: 'here' }, LOCK_MAX_AGE_MS + 1, { host: 'here', alive }), true);
+  });
+  test('the lock is machine-wide', () => assert.equal(path.basename(gateLockPath()), 'dev-kit-gate.lock'));
   test('a live lock makes the caller wait and then time out', async () => {
     const lock = path.join(os.tmpdir(), `devkit-lock-test2-${process.pid}.lock`);
     fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, host: os.hostname() }));

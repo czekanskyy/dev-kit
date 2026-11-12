@@ -133,9 +133,14 @@ export function expandHome(p) {
   return s;
 }
 
-/** Forward slashes, no duplicate or trailing slash; on Windows lower-case drive and map /c/x to c:/x. */
+/**
+ * Forward slashes, no duplicate or trailing slash; on Windows lower-case drive and map /c/x to c:/x.
+ * A UNC prefix (\\server\share or //server/share) keeps its leading double slash.
+ */
 export function normalizePath(p) {
   let s = String(p).replace(/\\/g, '/');
+  const unc = /^\/\/[^/]/.test(s);
+  if (unc) return `/${`/${s.slice(2)}`.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1')}`;
   if (IS_WIN) {
     const m = /^\/([a-zA-Z])(\/|$)/.exec(s);
     if (m) s = `${m[1]}:/${s.slice(3)}`;

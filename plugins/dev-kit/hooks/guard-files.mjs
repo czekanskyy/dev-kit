@@ -7,6 +7,7 @@ import {
   anyGlob,
   defaultExec,
   findRepoRoot,
+  globMatch,
   isInside,
   isSecretPath,
   loadConfig,
@@ -19,6 +20,31 @@ import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scrip
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const CLAUDE_CONFIG_GLOBS = ['.claude/settings.json', '.claude/settings.local.json', '.claude/workflow.json', '.claude/hooks/**'];
+
+const SECRET_SAMPLES = ['.env', '.env.local', '.env.production', 'id_rsa', 'id_ed25519', 'server.pem', 'server.key'];
+
+/** True when a search glob could select a secret file: tested against sample secret names. */
+export function globCanMatchSecret(glob, dir, config, root) {
+  const names = [...SECRET_SAMPLES];
+  for (const g of config.guard?.secrets ?? []) {
+    const last = String(g).split('/').pop();
+    if (last && !/[*?{[]/.test(last)) names.push(last);
+  }
+  const paths = names.flatMap((n) => [`${dir}/${n}`, `${dir}/sub/${n}`]);
+  // Concrete examples of the configured secret globs themselves, e.g. config/credentials.json.
+  for (const g of config.guard?.secrets ?? []) {
+    if (String(g).startsWith('~')) continue;
+    const concrete = String(g)
+      .replace(/\*\*\//g, '')
+      .replace(/\{([^,}]*)[^}]*\}/g, '$1')
+      .replace(/[*?]/g, 'x');
+    paths.push(`${root}/${concrete}`);
+  }
+  for (const p of paths) {
+    if (globMatch(glob, p, { root: dir }) && isSecretPath(p, config, { cwd: dir, root })) return true;
+  }
+  return false;
+}
 
 function regenerateHint(config) {
   const keys = Object.keys(config.commands ?? {}).filter((k) => /gen|codegen|types/i.test(k) && config.commands[k]);
@@ -55,6 +81,20 @@ export function evaluateFileTool(input, opts = {}) {
           reason: `${tool} of secret file "${c}" refused. Ask the user for the specific non-secret value you need, or read the example file (.env.example) instead.`,
         });
         break;
+      }
+    }
+    if (tool === 'Grep' && !out.length) {
+      let isDir = false;
+      try {
+        isDir = fs.statSync(basePath).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (isDir && (ti.hidden === true || (ti.glob && globCanMatchSecret(ti.glob, basePath, config, root)))) {
+        out.push({
+          decision: 'ask',
+          reason: `Grep over the directory "${ti.path ?? '.'}" ${ti.hidden === true ? 'includes hidden files' : `with glob "${ti.glob}"`}, which can reach secret files such as .env. Narrow the search, or confirm.`,
+        });
       }
     }
     return combineVerdicts(out);

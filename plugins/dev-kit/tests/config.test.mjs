@@ -110,6 +110,11 @@ describe('globMatch', () => {
       assert.ok(globMatch('C:/Users/**', 'c:\\users\\x\\a.txt'));
     });
   }
+  test('UNC prefixes keep their double slash', () => {
+    assert.equal(normalizePath('\\\\server\\share\\dir\\a.txt'), '//server/share/dir/a.txt');
+    assert.equal(normalizePath('//server/share//dir/'), '//server/share/dir');
+    assert.ok(globMatch('**/.env', '\\\\server\\share\\app\\.env'));
+  });
 });
 
 describe('validator and CLI', () => {

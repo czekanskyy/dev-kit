@@ -111,11 +111,27 @@ describe('notify', () => {
 describe('notify-hook', () => {
   test('permission prompt is urgent', () => assert.equal(buildNotification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Needs permission for Bash' }, 'demo').priority, 'max'));
   test('idle prompt is quiet', () => assert.equal(buildNotification({ hook_event_name: 'Notification', notification_type: 'idle_prompt' }, 'demo').priority, 'low'));
-  test('rate limit says limit reached', () => {
+  test('rate limit says Usage limit reached', () => {
     const n = buildNotification({ hook_event_name: 'StopFailure', error_type: 'rate_limit' }, 'demo');
     assert.equal(n.priority, 'max');
-    assert.match(n.title, /limit reached/);
+    assert.equal(n.title, 'demo');
+    assert.equal(n.message, 'Usage limit reached');
   });
-  test('other failures are urgent', () => assert.equal(buildNotification({ hook_event_name: 'StopFailure', error_type: 'authentication_failed' }, 'demo').priority, 'max'));
+  test('other failures are urgent and name only the matcher', () => {
+    const n = buildNotification({ hook_event_name: 'StopFailure', matcher: 'authentication_failed', message: 'token abc in /home/x/.env' }, 'demo');
+    assert.equal(n.priority, 'max');
+    assert.equal(n.message, 'Agent stopped with an error: authentication_failed');
+  });
+  test('free-text error fields are never forwarded', () => {
+    const n = buildNotification({ hook_event_name: 'StopFailure', error: 'failed reading /secret/path with KEY=123' }, 'demo');
+    assert.equal(n.message, 'Agent stopped with an error: unknown');
+  });
+  test('hook message text is never forwarded', () => {
+    const n = buildNotification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs permission to run rm -rf /data' }, 'demo');
+    assert.equal(n.message, 'Permission prompt waiting');
+    assert.doesNotMatch(JSON.stringify(n), /rm -rf|data/);
+  });
+  test('elicitation asks for a decision', () =>
+    assert.equal(buildNotification({ hook_event_name: 'Notification', notification_type: 'elicitation_dialog' }, 'demo').message, 'Agent needs your decision'));
   test('unknown notification types are ignored', () => assert.equal(buildNotification({ hook_event_name: 'Notification', notification_type: 'other' }, 'demo'), null));
 });

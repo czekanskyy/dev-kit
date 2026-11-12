@@ -33,8 +33,11 @@ their environment and need it to run `config.mjs` and `risk.mjs`.
 
 1. `git fetch <remote> <integration>`.
 2. Branch name from `branches.work` (`{stage}` = `stage.branchPrefix`, `{slug}` = short English
-   kebab-case summary). A hotfix uses `branches.hotfix` and targets `branches.hotfixBase`.
-3. Create it from `<remote>/<integration>`: `git branch <branch> <remote>/<integration>`.
+   kebab-case summary).
+3. Pick the base: normally `<integration>`. A hotfix uses `branches.hotfix` and its base is
+   `branches.hotfixBase` (a protected branch): use that base for the branch, the gate `--base`, the
+   diff and the pull request, and never merge it yourself (step 8).
+4. Create the branch from `<remote>/<base>`: `git branch <branch> <remote>/<base>`.
 4. The implementer runs with `isolation: worktree`, so it gets its own checkout. Tell it the branch to
    switch to. If `worktree.setup` is set, tell it to run it (with `{slot}` = the slug and `{path}` =
    its worktree path) before anything else.
@@ -74,8 +77,11 @@ that, ask the user how to proceed. Minor findings go into the PR body as follow-
 
 Apply the project's definition of done (`docs.done`): update the map, log and topic docs it names,
 in the `languages.docs` language. A one-line doc edit can be done inline; more goes to the
-implementer. Run the docs check (`docs.check`) if configured. Commit, push, gate again only if code
-changed.
+implementer. Run the docs check (`docs.check`) if configured. Commit and push.
+
+**The gate status is pinned to one commit.** After every new commit on the branch (docs, review
+fixes, rebase) rerun the gate with `--post-status` on the final head before merging, or the merge
+guard refuses.
 
 ## 7. Pull request
 
@@ -88,11 +94,17 @@ changed.
 
 ## 8. Merge per tier
 
-- T0 to T2 without risk paths: `gh pr merge <n> --squash --delete-branch`. You merge.
+Merge command (never `--auto`; the guard pins the merge to the gated commit):
+`gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`, where `<sha>` is
+`gh pr view <n> --json headRefOid --jq .headRefOid`.
+
+- Hotfix (base is a protected branch): never merge. Report the PR link for the user.
+- T0 to T2 without risk paths: run the merge command. You merge.
 - Risk paths touched, or T3, or `tiers.<Tn>.merge` is `ask`: run the same command. The bash guard
   will ask the user and send a push notification; wait for the answer. `human`: do not merge, report
   the PR link.
-- If the guard refuses (stale base, missing status), fix the cause and retry. Never bypass it.
+- If the guard refuses (stale base: fetch, rebase, gate again; missing status: gate again), fix the
+  cause and retry. Never bypass it.
 
 After merging: `git fetch` and update the local integration branch, run `worktree.sync` if set,
 notify `--priority low` with the PR link. Leave worktree removal to the user (it asks anyway).

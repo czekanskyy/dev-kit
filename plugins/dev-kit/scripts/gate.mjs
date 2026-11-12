@@ -2,7 +2,7 @@
 // The local merge gate.
 // Usage: node gate.mjs [--tier T0..T3] [--base <ref>] [--post-status] [--only <stepName>] [--dry-run]
 
-import { createHash } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -77,37 +77,71 @@ function pidAlive(pid) {
   }
 }
 
-/** Takes an exclusive lock file. Returns a release function, or throws after waitMs. */
+export const LOCK_FRESH_MS = 120 * 1000;
+export const LOCK_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/** Machine-wide gate lock path (one gate at a time across all repositories). */
+export function gateLockPath() {
+  return path.join(os.tmpdir(), 'dev-kit-gate.lock');
+}
+
+/**
+ * Decides whether an existing lock may be broken.
+ * Unreadable or empty locks younger than LOCK_FRESH_MS count as live (the owner may still be writing).
+ * A lock is stale when its pid is dead on this host, or when it is older than LOCK_MAX_AGE_MS.
+ */
+export function lockIsStale(holder, ageMs, { host = os.hostname(), alive = pidAlive } = {}) {
+  if (ageMs > LOCK_MAX_AGE_MS) return true;
+  if (!holder || !holder.pid) return ageMs > LOCK_FRESH_MS;
+  if (holder.host && holder.host !== host) return false;
+  return !alive(holder.pid);
+}
+
+/** Takes the exclusive lock file. Returns a release function, or throws after waitMs. */
 export async function acquireLock(lockPath, { waitMs = 60 * 60 * 1000, pollMs = 10000, log = console.log } = {}) {
   const start = Date.now();
+  const token = randomBytes(16).toString('hex');
   let announced = false;
   for (;;) {
+    let fd = null;
     try {
-      const fd = fs.openSync(lockPath, 'wx');
-      fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), started: new Date().toISOString() }));
-      fs.closeSync(fd);
+      fd = fs.openSync(lockPath, 'wx');
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    if (fd !== null) {
+      try {
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), started: new Date().toISOString(), token }));
+      } finally {
+        fs.closeSync(fd);
+      }
       let released = false;
       const release = () => {
         if (released) return;
         released = true;
         try {
-          fs.unlinkSync(lockPath);
+          const holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+          if (holder.token === token) fs.unlinkSync(lockPath);
         } catch {
-          // already gone
+          // gone or unreadable: not ours to remove
         }
       };
       process.on('exit', release);
       return release;
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
     }
     let holder = null;
+    let ageMs = 0;
     try {
-      holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    } catch {
+      const st = fs.statSync(lockPath);
+      ageMs = Date.now() - st.mtimeMs;
+      const text = fs.readFileSync(lockPath, 'utf8');
+      holder = text.trim() ? JSON.parse(text) : null;
+      if (holder?.started) ageMs = Math.max(ageMs, Date.now() - Date.parse(holder.started));
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
       holder = null;
     }
-    if (!holder || ((!holder.host || holder.host === os.hostname()) && !pidAlive(holder.pid))) {
+    if (lockIsStale(holder, ageMs)) {
       try {
         fs.unlinkSync(lockPath);
       } catch {
@@ -115,9 +149,9 @@ export async function acquireLock(lockPath, { waitMs = 60 * 60 * 1000, pollMs = 
       }
       continue;
     }
-    if (Date.now() - start >= waitMs) throw new Error(`gate lock still held by pid ${holder.pid} after ${Math.round(waitMs / 60000)} min`);
+    if (Date.now() - start >= waitMs) throw new Error(`gate lock still held by pid ${holder?.pid ?? 'unknown'} after ${Math.round(waitMs / 60000)} min`);
     if (!announced) {
-      log(`waiting for gate lock (held by pid ${holder.pid} since ${holder.started})`);
+      log(`waiting for gate lock (held by pid ${holder?.pid ?? 'unknown'} since ${holder?.started ?? 'unknown'})`);
       announced = true;
     }
     await new Promise((r) => setTimeout(r, pollMs));
@@ -173,7 +207,7 @@ function dirtyFiles(root, exec) {
     .filter((f) => !f.startsWith('.claude/state/'));
 }
 
-/** Runs the gate. Returns the exit code. deps: { exec, log, cwd } */
+/** Runs the gate. Returns the exit code. deps: { exec, gh (runner for gh calls), log, cwd, lockPath } */
 export async function runGate(args, deps = {}) {
   const exec = deps.exec ?? defaultExec;
   const log = deps.log ?? console.log;
@@ -188,9 +222,15 @@ export async function runGate(args, deps = {}) {
   const base = args.base ?? defaultBaseRef(config);
   const diff = changedFilesSince(base, { cwd: root, exec });
   if (!diff) log(`gate: cannot diff against ${base}; every conditional step will run`);
+  if (args.postStatus && args.only) {
+    log('gate: refusing --post-status with --only: a status must cover the whole gate.');
+    return 2;
+  }
   const steps = resolveSteps({ config, repoRoot: root, changedFiles: diff?.files ?? null, tier: args.tier, only: args.only });
-  const sha = gitTry(['rev-parse', 'HEAD'], { cwd: root, exec })?.trim() ?? null;
-  const branch = currentBranch(root, exec);
+  if (args.only && !steps.some((s) => s.name === args.only || s.name.endsWith(`: ${args.only}`) || s.run === args.only)) {
+    log(`gate: unknown step "${args.only}". Steps: ${steps.map((s) => s.name).join(', ') || '(none)'}`);
+    return 2;
+  }
 
   if (args.dryRun) {
     log(`gate plan: tier ${args.tier}, base ${base}, ${diff ? diff.files.length : 'unknown'} changed files`);
@@ -198,6 +238,26 @@ export async function runGate(args, deps = {}) {
     return 0;
   }
 
+  let release = () => {};
+  if (config.gate?.exclusive ?? true) {
+    try {
+      release = await acquireLock(deps.lockPath ?? gateLockPath(), { log });
+    } catch (err) {
+      log(`gate: ${err.message}`);
+      return 1;
+    }
+  }
+  try {
+    return await runLocked({ args, config, root, base, steps, exec, gh: deps.gh ?? exec, log });
+  } finally {
+    release();
+  }
+}
+
+async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
+  // Read the tested state only once the lock is held.
+  const sha = gitTry(['rev-parse', 'HEAD'], { cwd: root, exec })?.trim() ?? null;
+  const branch = currentBranch(root, exec);
   if (args.postStatus) {
     const dirty = dirtyFiles(root, exec);
     if (dirty.length) {
@@ -215,47 +275,37 @@ export async function runGate(args, deps = {}) {
     }
   }
 
-  let release = () => {};
-  if (config.gate?.exclusive ?? true) {
-    const common = gitTry(['rev-parse', '--git-common-dir'], { cwd: root, exec })?.trim() ?? root;
-    const id = createHash('sha1').update(normalizePath(path.resolve(root, common)).toLowerCase()).digest('hex').slice(0, 16);
-    try {
-      release = await acquireLock(path.join(os.tmpdir(), `dev-kit-gate-${id}.lock`), { log });
-    } catch (err) {
-      log(`gate: ${err.message}`);
-      return 1;
-    }
-  }
-
   const results = [];
   let ok = true;
   const t0 = Date.now();
-  try {
-    for (const s of steps) {
-      if (s.skip) {
-        results.push({ name: s.name, run: s.run, skipped: s.skip });
-        continue;
-      }
-      if (!ok) {
-        results.push({ name: s.name, run: s.run, skipped: 'an earlier step failed' });
-        continue;
-      }
-      const r = await runStep(s);
-      results.push({ name: s.name, run: s.run, ok: r.ok, seconds: Number(r.seconds.toFixed(1)) });
-      if (r.ok) log(`PASS ${s.name} ${r.seconds.toFixed(1)}s`);
-      else {
-        ok = false;
-        log(`FAIL ${s.name} ${r.seconds.toFixed(1)}s`);
-        log(r.tail);
-      }
+  for (const s of steps) {
+    if (s.skip) {
+      results.push({ name: s.name, run: s.run, skipped: s.skip });
+      continue;
     }
-  } finally {
-    release();
+    if (!ok) {
+      results.push({ name: s.name, run: s.run, skipped: 'an earlier step failed' });
+      continue;
+    }
+    const r = await runStep(s);
+    results.push({ name: s.name, run: s.run, ok: r.ok, seconds: Number(r.seconds.toFixed(1)) });
+    if (r.ok) log(`PASS ${s.name} ${r.seconds.toFixed(1)}s`);
+    else {
+      ok = false;
+      log(`FAIL ${s.name} ${r.seconds.toFixed(1)}s`);
+      log(r.tail);
+    }
   }
   const ran = results.filter((r) => r.ok !== undefined);
   if (!ran.length) log('gate: no steps ran (check gate.steps in .claude/workflow.json)');
 
-  const result = { sha, branch, tier: args.tier, base, ok, steps: results, seconds: Number(((Date.now() - t0) / 1000).toFixed(1)), finishedAt: new Date().toISOString() };
+  let changed = false;
+  if (args.postStatus) {
+    const sha2 = gitTry(['rev-parse', 'HEAD'], { cwd: root, exec })?.trim() ?? null;
+    changed = sha2 !== sha || dirtyFiles(root, exec).length > 0;
+  }
+
+  const result = { sha, branch, tier: args.tier, base, ok, treeChanged: changed, steps: results, seconds: Number(((Date.now() - t0) / 1000).toFixed(1)), finishedAt: new Date().toISOString() };
   if (sha) {
     const dir = path.join(root, '.claude', 'state', 'gate');
     try {
@@ -270,13 +320,23 @@ export async function runGate(args, deps = {}) {
     }
   }
 
-  if (args.postStatus && sha) {
+  if (args.postStatus) {
+    if (changed) {
+      log('gate: tree changed during gate (HEAD moved or files changed); no status posted. Rerun the gate on a stable tree.');
+      return 1;
+    }
+    if (ok && !ran.length) {
+      log('gate: refusing to post success: zero steps executed.');
+      return 1;
+    }
     const context = config.gate?.statusContext || 'local-gate';
     try {
-      const nwo = JSON.parse(exec('gh', ['repo', 'view', '--json', 'nameWithOwner'], { cwd: root, timeout: 30000 })).nameWithOwner;
-      const description = ok ? `${ran.length} steps passed locally` : `${results.find((r) => r.ok === false)?.name ?? 'a step'} failed locally`;
-      exec('gh', ['api', '-X', 'POST', `repos/${nwo}/statuses/${sha}`, '-f', `state=${ok ? 'success' : 'failure'}`, '-f', `context=${context}`, '-f', `description=${description}`], { cwd: root, timeout: 30000 });
-      log(`gate: posted ${ok ? 'success' : 'failure'} status "${context}" on ${sha.slice(0, 12)}`);
+      const nwo = JSON.parse(gh('gh', ['repo', 'view', '--json', 'nameWithOwner'], { cwd: root, timeout: 30000 })).nameWithOwner;
+      const description = ok
+        ? `${args.tier}: ${ran.length} steps passed locally`
+        : `${args.tier}: ${results.find((r) => r.ok === false)?.name ?? 'a step'} failed locally`;
+      gh('gh', ['api', '-X', 'POST', `repos/${nwo}/statuses/${sha}`, '-f', `state=${ok ? 'success' : 'failure'}`, '-f', `context=${context}`, '-f', `description=${description}`], { cwd: root, timeout: 30000 });
+      log(`gate: posted ${ok ? 'success' : 'failure'} status "${context}" on ${sha.slice(0, 12)} (${description})`);
     } catch (err) {
       log(`gate: could not post the commit status: ${String(err.stderr || err.message).trim()}`);
       return 1;

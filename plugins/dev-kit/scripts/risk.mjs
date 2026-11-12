@@ -123,43 +123,56 @@ export function analyzeRisk(opts = {}) {
   const root = config.repoRoot ?? findRepoRoot(cwd) ?? cwd;
   const remote = config.branches?.remote || 'origin';
 
+  // Any failure to retrieve the diff yields touchesRisk: null, which callers must treat as unknown.
+  const unavailable = (base, error) => ({
+    base,
+    error,
+    files: [],
+    riskFiles: [],
+    contentHits: [],
+    touchesRisk: null,
+    generatedTouched: [],
+    immutableEdited: [],
+  });
+  const timeout = opts.timeout ?? 20000;
+
   if (opts.pr !== undefined && opts.pr !== null) {
     const repoArgs = opts.repo ? ['--repo', opts.repo] : [];
     let files = opts.prFiles;
     let baseRef = opts.baseRefName ? `${remote}/${opts.baseRefName}` : null;
     if (!files) {
-      const view = JSON.parse(
-        exec('gh', ['pr', 'view', String(opts.pr), '--json', 'files,baseRefName', ...repoArgs], { cwd: root, timeout: 20000 }),
-      );
-      files = (view.files ?? []).map((f) => f.path);
-      baseRef = `${remote}/${view.baseRefName}`;
+      try {
+        const view = JSON.parse(exec('gh', ['pr', 'view', String(opts.pr), '--json', 'files,baseRefName', ...repoArgs], { cwd: root, timeout }));
+        files = (view.files ?? []).map((f) => f.path);
+        baseRef = `${remote}/${view.baseRefName}`;
+      } catch (err) {
+        return unavailable(baseRef, `gh pr view failed: ${err.message}`);
+      }
     }
-    let added = new Map();
+    let added;
     try {
-      added = parseAddedLines(exec('gh', ['pr', 'diff', String(opts.pr), ...repoArgs], { cwd: root, timeout: 20000 }));
-    } catch {
-      // Content patterns are skipped when the diff cannot be fetched.
+      added = parseAddedLines(exec('gh', ['pr', 'diff', String(opts.pr), ...repoArgs], { cwd: root, timeout }));
+    } catch (err) {
+      return unavailable(baseRef, `gh pr diff failed: ${err.message}`);
     }
     return { base: baseRef, ...analyzeFiles({ config, files, added, repoRoot: root, baseRef, exec }) };
   }
 
   const base = opts.base ?? defaultBaseRef(config);
   const mb = gitTry(['merge-base', base, 'HEAD'], { cwd: root, exec });
-  if (!mb) throw new Error(`cannot find a merge base between ${base} and HEAD (fetch the remote, or pass --base)`);
+  if (!mb) return unavailable(base, `cannot find a merge base between ${base} and HEAD (fetch the remote, or pass --base)`);
   const mergeBase = mb.trim();
-  const tracked = (gitTry(['diff', '--name-only', '--no-renames', '-z', mergeBase], { cwd: root, exec }) ?? '')
-    .split('\0')
-    .filter(Boolean);
-  const untracked = (gitTry(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, exec }) ?? '')
-    .split('\0')
-    .filter(Boolean);
-  const diff = gitTry(['diff', '-U0', '--no-color', '--no-ext-diff', '--no-renames', mergeBase], { cwd: root, exec }) ?? '';
+  const tracked = gitTry(['diff', '--name-only', '--no-renames', '-z', mergeBase], { cwd: root, exec });
+  const untrackedOut = gitTry(['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, exec });
+  const diff = gitTry(['diff', '-U0', '--no-color', '--no-ext-diff', '--no-renames', mergeBase], { cwd: root, exec });
+  if (tracked === null || untrackedOut === null || diff === null) return unavailable(base, 'git diff failed');
+  const untracked = untrackedOut.split('\0').filter(Boolean);
   const added = parseAddedLines(diff);
   for (const [f, lines] of untrackedAdded(root, untracked)) added.set(f, lines);
   return {
     base,
     mergeBase,
-    ...analyzeFiles({ config, files: [...tracked, ...untracked], added, repoRoot: root, baseRef: mergeBase, exec }),
+    ...analyzeFiles({ config, files: [...tracked.split('\0').filter(Boolean), ...untracked], added, repoRoot: root, baseRef: mergeBase, exec }),
   };
 }
 
@@ -198,6 +211,12 @@ function main() {
   const { files, ...rest } = result;
   if (args.json) {
     console.log(JSON.stringify(rest, null, 2));
+    if (result.error) process.exitCode = 2;
+    return;
+  }
+  if (result.error) {
+    console.error(`risk: analysis unavailable: ${result.error}`);
+    process.exitCode = 2;
     return;
   }
   console.log(`Base: ${result.base} (${files.length} changed files)`);

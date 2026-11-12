@@ -30,6 +30,13 @@ describe('reads', () => {
   test('Grep in src allowed', () => assert.equal(run('Grep', { pattern: 'KEY', path: 'src' }), 'allow'));
   test('Glob for .env files denied', () => assert.equal(run('Glob', { pattern: '**/.env' }), 'deny'));
   test('Glob for ts files allowed', () => assert.equal(run('Glob', { pattern: 'src/**/*.ts' }), 'allow'));
+  test('Grep over a directory with hidden files asks', () => assert.equal(run('Grep', { pattern: 'KEY', path: 'src', hidden: true }), 'ask'));
+  test('Grep over the repo with a glob that can match .env asks', () => assert.equal(run('Grep', { pattern: 'KEY', glob: '*.env*' }), 'ask'));
+  test('Grep with a glob for key files asks', () => assert.equal(run('Grep', { pattern: 'x', path: '.', glob: '**/*.{key,pem}' }), 'ask'));
+  test('Grep with a glob for project secret names asks', () => assert.equal(run('Grep', { pattern: 'x', glob: 'credentials.json' }), 'ask'));
+  test('Grep with a ts glob allowed', () => assert.equal(run('Grep', { pattern: 'KEY', path: 'src', glob: '*.ts' }), 'allow'));
+  test('Grep with hidden on a single file is not a directory search', () =>
+    assert.equal(run('Grep', { pattern: 'KEY', path: 'src/migrations/001_init.ts', hidden: true }), 'allow'));
 });
 
 describe('edits', () => {

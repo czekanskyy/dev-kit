@@ -64,7 +64,7 @@ stop and notify (`notify.mjs --priority high --title "<project>: quick fix block
 
 ## 6. Merge
 
-`gh pr merge <number> --squash --delete-branch`
+`gh pr merge <number> --squash --delete-branch --match-head-commit <sha>` (`<sha>` from `gh pr view <number> --json headRefOid --jq .headRefOid`; never `--auto`)
 
 The bash guard hook checks the green `local-gate` status on the PR head, an up-to-date base and the
 risk paths, and asks the user when needed. If it refuses because the base moved: rebase onto
