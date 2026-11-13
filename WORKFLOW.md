@@ -57,7 +57,8 @@ task branch  -->  <integration>  -->  <protected...>
 
 `gate.mjs` runs `gate.steps` in order (plus `subprojects` gates when their path is touched). Steps can
 be limited with `when` (globs) and `minTier`; `alwaysFromTier: "T3"` next to `when` makes a step run
-whenever the diff matches or the tier is at least that tier. Only one gate runs at a time on a machine
+whenever the diff matches or the tier is at least that tier (also for subproject steps, where it
+overrides the "diff does not touch the subproject" skip). Only one gate runs at a time on a machine
 (`gate.exclusive`), so two builds never compete.
 
 On success it posts a commit status (`gate.statusContext`, default `local-gate`) on the tested SHA.
@@ -122,8 +123,12 @@ Hooks run on every tool call in the project. Summary:
 - editing `guard.generated` files; editing `guard.immutableOnceMerged` files once they exist on the
   integration or a protected branch;
 - reading `guard.secrets` (with `guard.allowRead` exceptions such as `.env.example`), including a
-  recursive `grep -r` or `rg --hidden`/`-uu` over a directory that holds one: the refusal says to add
-  `--exclude='.env*'` (or `-g '!.env*'`), and the command then passes;
+  recursive `grep -r` or `rg --hidden`/`-uu` over a directory that holds one. The refusal says to add
+  `--exclude='.env*'` (or `-g '!.env*'`). Only a narrow form is trusted: a bare basename glob (no
+  `/`) that matches the secret file case-sensitively; for grep via `--exclude` (never
+  `--exclude-dir`) with no `--include*`, `--exclude-from`, `-L` or `--dereference-recursive`; for rg
+  via a negative `-g`/`--glob` with no later positive glob, no `--iglob`, no
+  `--glob-case-insensitive`, no `-L`/`--follow`. Naming the secret as a path is still refused;
 - printing the whole environment (`printenv`, `env`, `export -p`, `set`, `Get-ChildItem env:`) or a
   secret-looking variable (`printenv X_TOKEN`, `echo $API_KEY`): print only the variable you need;
 - `git worktree move` (it breaks symlinked `node_modules` and slot bindings) and
@@ -149,13 +154,18 @@ Hooks run on every tool call in the project. Summary:
   current base and no risk paths; `--match-head-commit` may be a unique prefix of at least 7 hex
   characters of the PR head;
 - `git worktree remove` (also with `--force`) and `rm -rf` of a worktree that is under
-  `worktree.root`, holds a `.agent-scope` file (made by the project's `worktree.setup`) and has an
-  empty `git status --porcelain` apart from `.agent-scope`;
+  `worktree.root` (real paths compared, so symlinks cannot escape), is listed by
+  `git worktree list`, is not the main worktree, the current checkout or an ancestor of either, holds
+  a `.agent-scope` file (made by the project's `worktree.setup`) and has a clean
+  `git status --porcelain --ignored`. Ignored entries are accepted only inside a
+  `guard.removableDirs` folder, as `.agent-scope`, or as a root-level `.env*` file (derived, recreated
+  by setup). Any other ignored file (local databases, uploads, media) makes the guard ask;
 - `git push <remote> --delete <task-branch>` for non-protected branches.
 
 A stop check runs `stopCheck.commands` when an agent tries to finish with uncommitted code changes
-matching `stopCheck.codeGlobs`. It is skipped while a merge, rebase, cherry-pick or revert is in
-progress, so the agent can finish resolving it.
+matching `stopCheck.codeGlobs`. Files with unresolved merge conflicts (`git diff --diff-filter=U`) are
+left out of the checked list so a half-finished merge does not block; every other changed file is
+still checked.
 
 ## Notifications
 

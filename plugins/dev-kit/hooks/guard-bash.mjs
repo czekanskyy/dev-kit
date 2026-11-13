@@ -438,24 +438,56 @@ function evalGit(cmd, ctx, state, out) {
 }
 
 /**
- * True when `target` is a finished agent worktree that may go without asking: under worktree.root
- * (resolved against the repo root), made by the project's setup (.agent-scope file) and clean
- * (git status --porcelain is empty, ignoring .agent-scope itself).
+ * True when `target` is a finished agent worktree that may go without asking. All must hold:
+ * - its real path (symlinks resolved) is strictly inside the real path of worktree.root
+ *   (resolved against the repo root);
+ * - git lists it in `git worktree list --porcelain`, and it is not the main worktree, not the
+ *   current checkout, and not an ancestor of either;
+ * - it holds a `.agent-scope` file (made by the project's setup);
+ * - `git status --porcelain --ignored` shows nothing but `.agent-scope`, ignored build output
+ *   (a directory named in guard.removableDirs) and root-level `.env*` files the setup recreates.
+ *   Any other ignored file (local databases, uploads, media) makes it ask.
  */
 export function worktreeRemovable(target, ctx, cwd) {
   const wtRoot = ctx.config.worktree?.root;
   if (!wtRoot || !ctx.repoRoot || typeof target !== 'string' || /[$`*?[]/.test(target)) return false;
-  const abs = toAbsolute(expandHome(target), cwd);
-  const rootAbs = toAbsolute(wtRoot, ctx.repoRoot);
-  if (!isInside(abs, rootAbs, { strict: true })) return false;
+  const real = (p) => normalizePath(fs.realpathSync(p));
+  const lc = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
   try {
+    const abs = real(toAbsolute(expandHome(target), cwd));
+    const rootAbs = real(toAbsolute(wtRoot, ctx.repoRoot));
+    if (!isInside(abs, rootAbs, { strict: true })) return false;
+    const list = String(ctx.call('git', ['worktree', 'list', '--porcelain'], { cwd: ctx.repoRoot }));
+    const trees = [];
+    for (const line of list.split(/\r?\n/)) {
+      if (!line.startsWith('worktree ')) continue;
+      try {
+        trees.push(real(line.slice('worktree '.length).trim()));
+      } catch {
+        // a registered worktree that no longer exists on disk
+      }
+    }
+    if (!trees.some((t) => lc(t) === lc(abs))) return false;
+    const protectedDirs = [trees[0], real(ctx.repoRoot), real(cwd), real(ctx.cwd)].filter(Boolean);
+    for (const p of protectedDirs) {
+      if (lc(p) === lc(abs) || isInside(p, abs)) return false;
+    }
     if (!fs.statSync(path.join(abs, '.agent-scope')).isFile()) return false;
-    const status = String(ctx.call('git', ['-C', abs, 'status', '--porcelain'], { cwd: abs }));
-    return status
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .every((l) => /^\?\?\s+"?\.agent-scope"?$/.test(l));
+    const removable = new Set((ctx.config.guard?.removableDirs ?? []).map((d) => d.toLowerCase()));
+    const status = String(ctx.call('git', ['-C', abs, 'status', '--porcelain', '--ignored'], { cwd: abs }));
+    for (const raw of status.split(/\r?\n/)) {
+      const l = raw.trimEnd();
+      if (!l) continue;
+      const code = l.slice(0, 2);
+      const file = l.slice(3).replace(/^"|"$/g, '').replace(/\/$/, '');
+      if (code === '??' && file === '.agent-scope') continue;
+      if (code !== '!!') return false;
+      if (file === '.agent-scope') continue;
+      if (!file.includes('/') && /^\.env($|\.)/.test(file)) continue;
+      if (file.split('/').some((s) => removable.has(s.toLowerCase()))) continue;
+      return false;
+    }
+    return true;
   } catch {
     return false;
   }
@@ -841,23 +873,22 @@ function nameGlobRe(g) {
       i = close;
     } else re += c.replace(/[.+^${}()|\\[\]]/g, '\\$&');
   }
-  return new RegExp(`^${re}$`, process.platform === 'win32' ? 'i' : '');
+  return new RegExp('^' + re + '$');
 }
 
 /**
- * Exclusions a recursive search already carries: grep --exclude/--exclude-dir, rg negative globs
- * (-g '!x'). Returns the argv without those option values, plus the name globs to test hits against.
+ * Exclusions a recursive search carries that the guard trusts. Deliberately narrow:
+ * - grep: --exclude=<bare basename glob> (--exclude-dir never counts for files); any --include*,
+ *   --exclude-from, -L or --dereference-recursive switches the trust off.
+ * - rg: -g/--glob '!<bare basename glob>' with no later positive glob; --iglob,
+ *   --glob-case-insensitive and -L/--follow switch the trust off.
+ * Globs containing a slash never count. Matching is always case-sensitive.
+ * Returns the argv without those option values, plus the regexes a secret file's basename must match.
  */
 function searchExcludes(b, argv) {
   const rest = [argv[0]];
-  const globs = [];
-  const take = (v) => {
-    if (v === undefined) return;
-    if (b === 'rg') {
-      if (v.startsWith('!')) globs.push(v.slice(1).replace(/\/+$/, '').replace(/^(\*\*\/|\/)+/, '').split('/').pop());
-    } else globs.push(v);
-  };
-  const longs = b === 'rg' ? ['glob', 'iglob'] : ['exclude', 'exclude-dir', 'exclude-from'];
+  const globs = []; // rg: {neg, glob}; grep: {neg: true, glob}
+  let off = false;
   for (let k = 1; k < argv.length; k++) {
     const a = argv[k];
     if (a === '--') {
@@ -865,22 +896,55 @@ function searchExcludes(b, argv) {
       break;
     }
     const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
-    if (m && longs.includes(m[1])) {
-      const v = m[2] !== undefined ? m[2] : argv[++k];
-      if (m[1] !== 'exclude-from') take(v);
+    if (m) {
+      const name = m[1];
+      const val = () => (m[2] !== undefined ? m[2] : argv[++k]);
+      if (b === 'rg') {
+        if (name === 'glob') {
+          const v = String(val());
+          globs.push({ neg: v.startsWith('!'), glob: v });
+        }
+        else if (name === 'iglob') {
+          val();
+          off = true;
+        } else if (name === 'follow' || name === 'glob-case-insensitive') off = true;
+        else rest.push(a);
+        continue;
+      }
+      if (name === 'exclude') globs.push({ neg: true, glob: String(val()) });
+      else if (name === 'exclude-dir') val();
+      else if (name === 'exclude-from' || name.startsWith('include') || name === 'dereference-recursive') {
+        if (name === 'exclude-from' || name === 'include' || name === 'include-dir') val();
+        off = true;
+        if (name === 'dereference-recursive') rest.push(a);
+      } else rest.push(a);
       continue;
     }
     if (b === 'rg' && a === '-g') {
-      take(argv[++k]);
+      const v = String(argv[++k] ?? '');
+      globs.push({ neg: v.startsWith('!'), glob: v });
       continue;
     }
     if (b === 'rg' && /^-g./.test(a)) {
-      take(a.slice(2));
+      globs.push({ neg: a.startsWith('-g!'), glob: a.slice(2) });
       continue;
     }
+    if (/^-[a-zA-Z]+$/.test(a) && a.includes('L')) off = true;
     rest.push(a);
   }
-  return { argv: rest, res: globs.filter(Boolean).map(nameGlobRe) };
+  let res = [];
+  if (!off) {
+    const valid = [];
+    globs.forEach((g, i) => {
+      if (!g.neg) return;
+      const name = b === 'rg' ? g.glob.slice(1) : g.glob;
+      if (!name || name.includes('/')) return;
+      if (b === 'rg' && globs.slice(i + 1).some((later) => !later.neg)) return;
+      valid.push(name);
+    });
+    res = valid.map(nameGlobRe);
+  }
+  return { argv: rest, res };
 }
 
 function evalSecrets(cmd, ctx, state, out) {
@@ -929,13 +993,8 @@ function evalSecrets(cmd, ctx, state, out) {
       });
       const targets = dirs.length ? dirs : ['.'];
       for (const d of targets) {
-        const searchRoot = normalizePath(toAbsolute(expandHome(d), state.cwd));
-        const skip = excl.res.length
-          ? (p, isDir) => {
-              const rel = relativeTo(normalizePath(p), searchRoot).split('/');
-              return isDir ? excl.res.some((re) => re.test(rel[rel.length - 1])) : excl.res.some((re) => rel.some((seg) => re.test(seg)));
-            }
-          : null;
+        // Only a secret FILE can be excluded, by its basename. Directories never are.
+        const skip = excl.res.length ? (p, isDir) => !isDir && excl.res.some((re) => re.test(path.basename(p))) : null;
         const hit = findSecretUnder(toAbsolute(expandHome(d), state.cwd), ctx, { skip });
         if (hit) {
           const fix =

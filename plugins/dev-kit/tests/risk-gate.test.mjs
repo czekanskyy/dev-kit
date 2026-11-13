@@ -109,6 +109,17 @@ describe('gate step selection', () => {
     test('still runs below the tier when the globs match', () => {
       assert.deepEqual(run('T1', ['src/migrations/002.sql']), ['migrations-check']);
     });
+    test('applies to subproject steps too', () => {
+      const c = configFor(os.tmpdir(), {
+        ...PROJECT,
+        gate: { steps: [] },
+        subprojects: [{ path: 'packages/mobile', gate: [{ name: 'mobile-test', run: 'node -e "3"', alwaysFromTier: 'T3' }, { name: 'mobile-lint', run: 'node -e "4"' }] }],
+      });
+      const sub = (tier, files) => names(resolveSteps({ config: c, changedFiles: files, tier }));
+      assert.deepEqual(sub('T3', ['src/app.ts']), ['packages/mobile: mobile-test']);
+      assert.deepEqual(sub('T2', ['src/app.ts']), []);
+      assert.deepEqual(sub('T1', ['packages/mobile/a.ts']), ['packages/mobile: mobile-test', 'packages/mobile: mobile-lint']);
+    });
     test('minTier still wins', () => {
       const c = configFor(os.tmpdir(), { ...PROJECT, gate: { steps: [{ run: 'node -e "2"', when: ['x/**'], minTier: 'T3', alwaysFromTier: 'T1' }] }, subprojects: [] });
       assert.deepEqual(names(resolveSteps({ config: c, changedFiles: ['y'], tier: 'T2' })), []);

@@ -36,8 +36,9 @@ later. Known gaps:
 - Interpreters (`node -e`, `python -c`, `perl`) and scripts the agent writes and runs can do anything the guard refuses.
 - Variables and indirection (`X=main; git push origin $X`, `$(echo cat) .env`, aliases, functions, base64) hide commands.
   The guard checks a command before it runs and cannot resolve shell variables, so `gh pr merge $n ...` is refused: use literal values.
-- `--exclude`/`-g '!glob'` exclusions are matched by file or directory name only; a path glob such as `src/**/.env` is reduced to its last segment.
-- A worktree counts as a finished agent slot only with a `.agent-scope` file and a clean status; `rm -rf` of it is not unregistered from git, use `git worktree remove`.
+- A recursive search over a secret file passes only with a bare basename exclusion (`--exclude='.env*'`, `-g '!.env*'`); path-qualified globs, `--exclude-dir`, `--iglob`, `--include*` and similar never count, so some safe commands are refused on purpose.
+- A worktree counts as a finished agent slot only under `worktree.root` (real paths), listed by git, with a `.agent-scope` file and a clean status including ignored files; other ignored files (local databases, uploads) make the guard ask. `rm -rf` of a slot is not unregistered from git, use `git worktree remove`.
+- The stop check skips only files with unresolved merge conflicts; it does not detect other half-finished operations.
 - Text piped into a shell (`echo "..." | bash`) is not inspected; only a download piped into one is.
 - Git aliases (`git p` for push) are not expanded; hook or config edits through the Edit tool only ask.
 - `cd` inside a subshell or `bash -c` leaks into the following commands of the same line.

@@ -56,7 +56,8 @@ export function resolveSteps({ config, repoRoot, changedFiles, tier = 'T3', only
     const scope = normalizePath(sp.path).replace(/^\.\//, '').replace(/\/$/, '');
     const touched = !files || files.some((f) => f === scope || f.startsWith(`${scope}/`));
     for (const s of sp.gate ?? []) {
-      if (!touched) {
+      const always = typeof s === 'object' && s.alwaysFromTier && tierIdx >= TIERS.indexOf(s.alwaysFromTier);
+      if (!touched && !always) {
         const obj = typeof s === 'string' ? { run: s } : s;
         steps.push({ name: `${scope}: ${obj.name ?? obj.run}`, run: commandFor(obj.run, config), cwd: path.join(root, scope), env: obj.env ?? {}, skip: `diff does not touch ${scope}/` });
       } else {

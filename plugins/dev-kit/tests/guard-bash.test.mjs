@@ -389,17 +389,47 @@ describe('recursive search over a directory holding secrets', () => {
     "grep -rn KEY --exclude='.env*' .",
     'grep -rn KEY --exclude=.env* .',
     "grep -rn KEY --exclude '.env*' .",
-    'grep -rn KEY --exclude-dir=.env .',
     "grep -rn --exclude='.env' KEY",
     "rg --hidden KEY -g '!.env*' .",
     "rg --hidden KEY --glob '!.env*'",
     'rg -uu KEY --glob=!.env',
-    "rg --hidden -g'!**/.env*' KEY",
+    "rg --hidden -g'!.env*' KEY",
+    "rg --hidden KEY -g '.env*' -g '!.env*' .",
   ]) {
     test(`allowed with the secret excluded: ${c}`, () => assert.equal(run(c), 'allow'));
   }
-  for (const c of ["grep -rn KEY --exclude='*.log' .", "rg --hidden KEY -g '!*.log' .", "rg --hidden KEY -g '.env*' ."]) {
-    test(`still denied when the exclusion misses the secret: ${c}`, () => assert.equal(run(c), 'deny'));
+  for (const c of [
+    "grep -rn KEY --exclude='*.log' .",
+    "rg --hidden KEY -g '!*.log' .",
+    "rg --hidden KEY -g '.env*' .",
+    // finding 3: --exclude-dir never covers files
+    'grep -rn KEY --exclude-dir=.env .',
+    // finding 1: path-qualified globs never count
+    "rg --hidden KEY -g '!src/.env*' .",
+    "rg --hidden -g'!**/.env*' KEY",
+    "grep -rn KEY --exclude='./.env' .",
+    "grep -rn KEY --exclude='*/.env' .",
+    // finding 2: a later positive glob cancels the negative one
+    "rg --hidden KEY -g '!.env*' -g '.env*' .",
+    "rg --hidden KEY --glob '!.env*' --glob='*' .",
+    // finding 4: always case-sensitive, --iglob never counts
+    "grep -rn KEY --exclude='.ENV*' .",
+    "rg --hidden KEY -g '!.ENV' .",
+    "rg --hidden KEY -g '!.env*' --iglob '*' .",
+    "rg --hidden KEY --iglob '!.env*' .",
+    'rg --hidden KEY -g "!.env*" --glob-case-insensitive .',
+    // other switches that void the exclusion
+    "grep -rn KEY --exclude='.env*' --include='*' .",
+    "grep -rn KEY --exclude='.env*' --include-dir=src .",
+    "grep -rn KEY --exclude='.env*' --exclude-from=list.txt .",
+    "grep -rnL KEY --exclude='.env*' .",
+    "grep --dereference-recursive KEY --exclude='.env*' .",
+    "rg --hidden -L KEY -g '!.env*' .",
+    // naming the secret explicitly
+    "grep -rn KEY --exclude='.env*' .env .",
+    "rg --hidden KEY -g '!.env*' .env",
+  ]) {
+    test(`denied despite the exclusion: ${c}`, () => assert.equal(run(c), 'deny'));
   }
   test('plain rg allowed', () => assert.equal(run('rg KEY .'), 'allow'));
   test('grep -r in a clean subdir allowed', () => assert.equal(run('grep -r KEY src'), 'allow'));
@@ -631,16 +661,27 @@ describe('git worktree', () => {
   };
   mk('.claude/worktrees/s1');
   mk('.claude/worktrees/s2');
+  mk('.claude/worktrees/unlisted');
   mk('.claude/worktrees/noscope', false);
   mk('other/s3');
-  const gitStatus = (out) => mockExec({ 'git -C': () => out });
-  const run = (c, exec = gitStatus('')) => check(c, { cwd: repo, config: wtCfg, exec });
+  fs.mkdirSync(path.join(repo, '.claude/worktrees/s1/sub'));
+  let linked = true;
+  try {
+    fs.symlinkSync(path.join(repo, 'other', 's3'), path.join(repo, '.claude/worktrees/link'), 'junction');
+  } catch {
+    linked = false;
+  }
+  const listed = ['', '.claude/worktrees/s1', '.claude/worktrees/s2', '.claude/worktrees/noscope', 'other/s3']
+    .map((r) => `worktree ${fs.realpathSync(path.join(repo, r))}\nHEAD abc\nbranch refs/heads/x\n`)
+    .join('\n');
+  const gitStatus = (out, list = listed) => mockExec({ 'git -C': () => out, 'git worktree list': () => list });
+  const run = (c, exec = gitStatus(''), cwd = repo) => check(c, { cwd, config: wtCfg, exec });
   test('remove of a clean slot under worktree.root allowed', () => assert.equal(run('git worktree remove .claude/worktrees/s1'), 'allow'));
   test('only .agent-scope untracked still allowed', () => assert.equal(run('git worktree remove .claude/worktrees/s1', gitStatus('?? .agent-scope\n')), 'allow'));
   test('--force allowed under the same conditions', () => assert.equal(run('git worktree remove --force .claude/worktrees/s1'), 'allow'));
   test('dirty slot asks', () => assert.equal(run('git worktree remove .claude/worktrees/s1', gitStatus(' M src/a.ts\n')), 'ask'));
   test('dirty slot asks even with --force', () => assert.equal(run('git worktree remove -f .claude/worktrees/s1', gitStatus('?? new.txt\n')), 'ask'));
-  test('status failure asks', () => assert.equal(run('git worktree remove .claude/worktrees/s1', mockExec({ 'git -C': exitError(128) })), 'ask'));
+  test('status failure asks', () => assert.equal(run('git worktree remove .claude/worktrees/s1', mockExec({ 'git -C': exitError(128), 'git worktree list': () => listed })), 'ask'));
   test('slot without .agent-scope asks', () => assert.equal(run('git worktree remove .claude/worktrees/noscope'), 'ask'));
   test('worktree outside worktree.root asks', () => assert.equal(run('git worktree remove other/s3'), 'ask'));
   test('worktree.root itself asks', () => assert.equal(run('git worktree remove .claude/worktrees'), 'ask'));
@@ -650,6 +691,32 @@ describe('git worktree', () => {
   test('rm -rf of a clean slot allowed', () => assert.equal(run('rm -rf .claude/worktrees/s2'), 'allow'));
   test('rm -rf of a dirty slot asks', () => assert.equal(run('rm -rf .claude/worktrees/s2', gitStatus('?? x\n')), 'ask'));
   test('rm -rf of a slot without .agent-scope asks', () => assert.equal(run('rm -rf .claude/worktrees/noscope'), 'ask'));
+  // real paths, registered worktrees, current checkout
+  test('a directory git does not list as a worktree asks', () => assert.equal(run('git worktree remove .claude/worktrees/unlisted'), 'ask'));
+  test('failing worktree list asks', () => assert.equal(run('git worktree remove .claude/worktrees/s1', mockExec({ 'git -C': () => '', 'git worktree list': exitError(128) })), 'ask'));
+  test('the current checkout asks', () => assert.equal(run('git worktree remove .', gitStatus(''), path.join(repo, '.claude/worktrees/s1')), 'ask'));
+  test('an ancestor of the current directory asks', () => {
+    assert.equal(run('git worktree remove .claude/worktrees/s1', gitStatus(''), path.join(repo, '.claude/worktrees/s1/sub')), 'ask');
+    assert.equal(run('git worktree remove ..', gitStatus(''), path.join(repo, '.claude/worktrees/s1/sub')), 'ask');
+  });
+  test('a path that climbs out of the root asks', () => assert.equal(run('git worktree remove .claude/worktrees/../../other/s3'), 'ask'));
+  test('a symlink inside the root pointing outside asks', { skip: !linked }, () => assert.equal(run('git worktree remove .claude/worktrees/link'), 'ask'));
+  // ignored files
+  const ign = (...lines) => gitStatus(`${lines.map((l) => `!! ${l}`).join('\n')}\n`);
+  test('ignored build output and derived .env files are fine', () => {
+    assert.equal(run('git worktree remove .claude/worktrees/s1', ign('node_modules/', '.next/', 'packages/app/dist/', '.env', '.env.local', '.agent-scope')), 'allow');
+  });
+  test('other ignored files ask', () => {
+    for (const f of ['data/local.db', 'uploads/', 'media/photo.jpg', 'sub/.env', 'notes.txt', 'dev.sqlite']) {
+      assert.equal(run('git worktree remove .claude/worktrees/s1', ign('node_modules/', f)), 'ask', f);
+    }
+  });
+  test('rm -rf also asks about other ignored files', () => assert.equal(run('rm -rf .claude/worktrees/s2', ign('uploads/')), 'ask'));
+  test('git status is asked for ignored files too', () => {
+    const exec = gitStatus('');
+    run('git worktree remove .claude/worktrees/s1', exec);
+    assert.ok(exec.calls.some((c) => / status --porcelain --ignored$/.test(c)));
+  });
   test('worktree move denied with the reason', () => {
     const v = evaluateBash('git worktree move .claude/worktrees/s1 elsewhere', { cwd: repo, config: wtCfg, exec: mockExec(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {} });
     assert.equal(v.decision, 'deny');

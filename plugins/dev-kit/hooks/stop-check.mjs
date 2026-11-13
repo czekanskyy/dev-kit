@@ -30,16 +30,6 @@ function defaultRun(command, cwd, timeout) {
   return { ok: r.status === 0, output };
 }
 
-const IN_PROGRESS_MARKERS = ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'];
-
-/** True while a merge, rebase, cherry-pick or revert is in progress (works in worktrees). */
-export function operationInProgress(root, exec) {
-  const out = gitTry(['rev-parse', '--git-dir'], { cwd: root, exec });
-  if (!out) return false;
-  const gitDir = path.resolve(root, out.trim());
-  return IN_PROGRESS_MARKERS.some((m) => fs.existsSync(path.join(gitDir, m)));
-}
-
 /**
  * Returns null (let the agent stop) or {decision:'block', reason}.
  * opts: { config, exec, run(command, cwd, timeoutMs) -> {ok, output}, now() }
@@ -54,11 +44,13 @@ export function checkStop(input, opts = {}) {
   const root = config.repoRoot ?? findRepoRoot(cwd);
   if (!root) return null;
   const exec = opts.exec ?? defaultExec;
-  if (operationInProgress(root, exec)) return null;
   const status = gitTry(['status', '--porcelain=v1', '-z', '-uall'], { cwd: root, exec });
   if (status === null) return null;
   const globs = config.stopCheck?.codeGlobs?.length ? config.stopCheck.codeGlobs : ['**'];
-  const changed = parsePorcelainZ(status).filter((f) => anyGlob(globs, f, { root }));
+  // Files with unresolved merge conflicts cannot pass checks yet; every other changed file still does.
+  const unmergedOut = gitTry(['diff', '--name-only', '--diff-filter=U'], { cwd: root, exec }) ?? '';
+  const unmerged = new Set(unmergedOut.split(/\r?\n/).filter(Boolean).map(normalizePath));
+  const changed = parsePorcelainZ(status).filter((f) => !unmerged.has(f) && anyGlob(globs, f, { root }));
   if (!changed.length) return null;
   const existing = changed.filter((f) => fs.existsSync(path.join(root, f)));
   const run = opts.run ?? defaultRun;
