@@ -395,6 +395,10 @@ describe('recursive search over a directory holding secrets', () => {
     'rg -uu KEY --glob=!.env',
     "rg --hidden -g'!.env*' KEY",
     "rg --hidden KEY -g '.env*' -g '!.env*' .",
+    "rg --hidden -g '!.env*' -e KEY .",
+    "grep -rn -m 5 -e KEY --exclude='.env*' .",
+    "rg --hidden -t js -g '!.env*' KEY .",
+    "rg --hidden -A 2 -g '!.env*' KEY .",
   ]) {
     test(`allowed with the secret excluded: ${c}`, () => assert.equal(run(c), 'allow'));
   }
@@ -425,6 +429,20 @@ describe('recursive search over a directory holding secrets', () => {
     "grep -rnL KEY --exclude='.env*' .",
     "grep --dereference-recursive KEY --exclude='.env*' .",
     "rg --hidden -L KEY -g '!.env*' .",
+    // option values that imitate exclusions
+    "rg --hidden -e '-g!.env*' -e KEY .",
+    "grep -rn -e '--exclude=.env*' -e KEY .",
+    "rg --hidden --regexp='-g!.env*' .",
+    "rg --hidden --regexp '-g!.env*' .",
+    "grep -rn --regexp=--exclude=.env* .",
+    "rg --hidden -e-g!.env* .",
+    "grep -rn -e--exclude=.env* .",
+    "rg --hidden -f '-g!.env*' .",
+    "grep -rn --file=--exclude=.env* .",
+    "grep -rn -m 1 -e '--exclude=.env*' .",
+    "rg --hidden -- '-g!.env*' .",
+    "grep -rn -- '--exclude=.env*' .",
+    "rg -t '-g!.env*' --hidden KEY .",
     // naming the secret explicitly
     "grep -rn KEY --exclude='.env*' .env .",
     "rg --hidden KEY -g '!.env*' .env",
@@ -710,6 +728,14 @@ describe('git worktree', () => {
     for (const f of ['data/local.db', 'uploads/', 'media/photo.jpg', 'sub/.env', 'notes.txt', 'dev.sqlite']) {
       assert.equal(run('git worktree remove .claude/worktrees/s1', ign('node_modules/', f)), 'ask', f);
     }
+  });
+  test('an ignored .env directory asks, an ignored .env file does not', () => {
+    assert.equal(run('git worktree remove .claude/worktrees/s1', ign('node_modules/', '.env.local/')), 'ask');
+    assert.equal(run('git worktree remove .claude/worktrees/s1', ign('.env/')), 'ask');
+    assert.equal(run('git worktree remove .claude/worktrees/s1', ign('.env.local')), 'allow');
+  });
+  test('an ignored directory named .env.x inside a removable dir is fine', () => {
+    assert.equal(run('git worktree remove .claude/worktrees/s1', ign('node_modules/.env.cache/')), 'allow');
   });
   test('rm -rf also asks about other ignored files', () => assert.equal(run('rm -rf .claude/worktrees/s2', ign('uploads/')), 'ask'));
   test('git status is asked for ignored files too', () => {

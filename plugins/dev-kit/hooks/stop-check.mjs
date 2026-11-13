@@ -48,8 +48,8 @@ export function checkStop(input, opts = {}) {
   if (status === null) return null;
   const globs = config.stopCheck?.codeGlobs?.length ? config.stopCheck.codeGlobs : ['**'];
   // Files with unresolved merge conflicts cannot pass checks yet; every other changed file still does.
-  const unmergedOut = gitTry(['diff', '--name-only', '--diff-filter=U'], { cwd: root, exec }) ?? '';
-  const unmerged = new Set(unmergedOut.split(/\r?\n/).filter(Boolean).map(normalizePath));
+  const unmergedOut = gitTry(['diff', '--name-only', '--diff-filter=U', '-z'], { cwd: root, exec }) ?? '';
+  const unmerged = new Set(unmergedOut.split('\0').filter(Boolean).map(normalizePath));
   const changed = parsePorcelainZ(status).filter((f) => !unmerged.has(f) && anyGlob(globs, f, { root }));
   if (!changed.length) return null;
   const existing = changed.filter((f) => fs.existsSync(path.join(root, f)));

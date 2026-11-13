@@ -128,7 +128,7 @@ Hooks run on every tool call in the project. Summary:
   `/`) that matches the secret file case-sensitively; for grep via `--exclude` (never
   `--exclude-dir`) with no `--include*`, `--exclude-from`, `-L` or `--dereference-recursive`; for rg
   via a negative `-g`/`--glob` with no later positive glob, no `--iglob`, no
-  `--glob-case-insensitive`, no `-L`/`--follow`. Naming the secret as a path is still refused;
+  `--glob-case-insensitive`, no `-L`/`--follow`; option values and anything after `--` are never read as flags, and a dash-leading `-e`/`--regexp`/`-f` value voids the exclusion. Naming the secret as a path is still refused;
 - printing the whole environment (`printenv`, `env`, `export -p`, `set`, `Get-ChildItem env:`) or a
   secret-looking variable (`printenv X_TOKEN`, `echo $API_KEY`): print only the variable you need;
 - `git worktree move` (it breaks symlinked `node_modules` and slot bindings) and

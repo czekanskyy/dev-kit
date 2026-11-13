@@ -479,11 +479,14 @@ export function worktreeRemovable(target, ctx, cwd) {
       const l = raw.trimEnd();
       if (!l) continue;
       const code = l.slice(0, 2);
-      const file = l.slice(3).replace(/^"|"$/g, '').replace(/\/$/, '');
+      const entry = l.slice(3).replace(/^"|"$/g, '');
+      const isDir = entry.endsWith('/');
+      const file = entry.replace(/\/$/, '');
       if (code === '??' && file === '.agent-scope') continue;
       if (code !== '!!') return false;
       if (file === '.agent-scope') continue;
-      if (!file.includes('/') && /^\.env($|\.)/.test(file)) continue;
+      // The root-level .env exception is for files only: an ignored directory named .env.x is not derived.
+      if (!isDir && !file.includes('/') && /^\.env($|\.)/.test(file)) continue;
       if (file.split('/').some((s) => removable.has(s.toLowerCase()))) continue;
       return false;
     }
@@ -876,18 +879,32 @@ function nameGlobRe(g) {
   return new RegExp('^' + re + '$');
 }
 
+const GREP_VALUE_SHORT = 'efmABCdD';
+const RG_VALUE_SHORT = 'efgmABCtTjMErd';
+const GREP_VALUE_LONG = new Set(['regexp', 'file', 'max-count', 'after-context', 'before-context', 'context', 'devices', 'directories', 'label', 'binary-files', 'color', 'colour']);
+const RG_VALUE_LONG = new Set([
+  'regexp', 'file', 'max-count', 'after-context', 'before-context', 'context', 'type', 'type-not', 'type-add', 'type-clear', 'threads', 'max-columns',
+  'encoding', 'replace', 'max-depth', 'maxdepth', 'max-filesize', 'color', 'colors', 'sort', 'sortr', 'path-separator', 'pre', 'pre-glob', 'engine',
+  'ignore-file', 'field-context-separator', 'field-match-separator', 'context-separator', 'dfa-size-limit', 'regex-size-limit', 'hostname-bin', 'hyperlink-format',
+]);
+
 /**
  * Exclusions a recursive search carries that the guard trusts. Deliberately narrow:
  * - grep: --exclude=<bare basename glob> (--exclude-dir never counts for files); any --include*,
  *   --exclude-from, -L or --dereference-recursive switches the trust off.
  * - rg: -g/--glob '!<bare basename glob>' with no later positive glob; --iglob,
  *   --glob-case-insensitive and -L/--follow switch the trust off.
+ * - Arguments consumed by value-taking options and everything after -- are values, never flags.
+ *   A pattern or pattern-file value (-e, --regexp, -f, --file) that starts with a dash switches the
+ *   trust off, because it could imitate an option.
  * Globs containing a slash never count. Matching is always case-sensitive.
  * Returns the argv without those option values, plus the regexes a secret file's basename must match.
  */
 function searchExcludes(b, argv) {
   const rest = [argv[0]];
   const globs = []; // rg: {neg, glob}; grep: {neg: true, glob}
+  const valueShort = b === 'rg' ? RG_VALUE_SHORT : GREP_VALUE_SHORT;
+  const valueLong = b === 'rg' ? RG_VALUE_LONG : GREP_VALUE_LONG;
   let off = false;
   for (let k = 1; k < argv.length; k++) {
     const a = argv[k];
@@ -899,37 +916,54 @@ function searchExcludes(b, argv) {
     if (m) {
       const name = m[1];
       const val = () => (m[2] !== undefined ? m[2] : argv[++k]);
-      if (b === 'rg') {
-        if (name === 'glob') {
-          const v = String(val());
-          globs.push({ neg: v.startsWith('!'), glob: v });
-        }
-        else if (name === 'iglob') {
-          val();
-          off = true;
-        } else if (name === 'follow' || name === 'glob-case-insensitive') off = true;
-        else rest.push(a);
-        continue;
-      }
-      if (name === 'exclude') globs.push({ neg: true, glob: String(val()) });
-      else if (name === 'exclude-dir') val();
-      else if (name === 'exclude-from' || name.startsWith('include') || name === 'dereference-recursive') {
-        if (name === 'exclude-from' || name === 'include' || name === 'include-dir') val();
+      if (b === 'rg' && name === 'glob') {
+        const v = String(val());
+        globs.push({ neg: v.startsWith('!'), glob: v });
+      } else if (b === 'rg' && name === 'iglob') {
+        val();
+        off = true;
+      } else if (b === 'rg' && (name === 'follow' || name === 'glob-case-insensitive')) off = true;
+      else if (b !== 'rg' && name === 'exclude') globs.push({ neg: true, glob: String(val()) });
+      else if (b !== 'rg' && name === 'exclude-dir') val();
+      else if (b !== 'rg' && (name === 'exclude-from' || name.startsWith('include') || name === 'dereference-recursive')) {
         off = true;
         if (name === 'dereference-recursive') rest.push(a);
+        else if (m[2] === undefined) k++;
+      } else if (valueLong.has(name)) {
+        const v = String(val() ?? '');
+        if ((name === 'regexp' || name === 'file') && v.startsWith('-')) off = true;
+        rest.push(m[2] !== undefined ? a : `--${name}`);
+        if (m[2] === undefined) rest.push(v);
       } else rest.push(a);
       continue;
     }
-    if (b === 'rg' && a === '-g') {
-      const v = String(argv[++k] ?? '');
-      globs.push({ neg: v.startsWith('!'), glob: v });
+    if (/^-[A-Za-z0-9]/.test(a)) {
+      let consumed = null;
+      let extra = null;
+      for (let j = 1; j < a.length; j++) {
+        const ch = a[j];
+        if (ch === 'L') off = true;
+        if (b === 'rg' && ch === 'g') {
+          const v = a.length > j + 1 ? a.slice(j + 1) : String(argv[++k] ?? '');
+          globs.push({ neg: v.startsWith('!'), glob: v });
+          consumed = 'glob';
+          break;
+        }
+        if (valueShort.includes(ch)) {
+          const attached = a.slice(j + 1);
+          const v = attached || String(argv[++k] ?? '');
+          if ((ch === 'e' || ch === 'f') && v.startsWith('-')) off = true;
+          consumed = 'value';
+          if (!attached) extra = v;
+          break;
+        }
+      }
+      if (consumed !== 'glob') {
+        rest.push(a);
+        if (extra !== null) rest.push(extra);
+      }
       continue;
     }
-    if (b === 'rg' && /^-g./.test(a)) {
-      globs.push({ neg: a.startsWith('-g!'), glob: a.slice(2) });
-      continue;
-    }
-    if (/^-[a-zA-Z]+$/.test(a) && a.includes('L')) off = true;
     rest.push(a);
   }
   let res = [];

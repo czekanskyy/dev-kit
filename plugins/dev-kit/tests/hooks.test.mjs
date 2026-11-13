@@ -72,12 +72,19 @@ describe('stop-check', () => {
     test('unmerged files are left out of the checked list, the others still run', () => {
       fs.writeFileSync(path.join(root, 'src', 'conflict.ts'), '');
       const ran = [];
-      checkStop(input, { config, exec: both('src/conflict.ts\n'), run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      checkStop(input, { config, exec: both('src/conflict.ts\0'), run: (c) => (ran.push(c), { ok: true, output: '' }) });
       assert.deepEqual(ran, ['node -e "process.exit(0)"', 'eslint "src/a.ts"']);
     });
     test('only unmerged changes means nothing to check', () => {
-      const exec = mockExec({ 'git diff --name-only --diff-filter=U': 'src/conflict.ts\n', 'git status': 'UU src/conflict.ts\0' });
+      const exec = mockExec({ 'git diff --name-only --diff-filter=U': 'src/conflict.ts\0', 'git status': 'UU src/conflict.ts\0' });
       assert.equal(checkStop(input, { config, exec, run: () => assert.fail('should not run') }), null);
+    });
+    test('non-ASCII unmerged paths match the NUL-delimited status paths', () => {
+      const exec = mockExec({ 'git diff --name-only --diff-filter=U -z': 'src/zażółć.ts\0src/other.ts\0', 'git status': ' M src/a.ts\0UU src/zażółć.ts\0' });
+      const ran = [];
+      checkStop(input, { config, exec, run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      assert.deepEqual(ran, ['node -e "process.exit(0)"', 'eslint "src/a.ts"']);
+      assert.ok(exec.calls.some((c) => c.endsWith('--diff-filter=U -z')));
     });
     test('a fake MERGE_HEAD changes nothing: checks still run and can block', () => {
       fs.writeFileSync(path.join(root, '.git', 'MERGE_HEAD'), 'abc\n');
