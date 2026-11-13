@@ -56,7 +56,8 @@ task branch  -->  <integration>  -->  <protected...>
 ## Local gate and commit status
 
 `gate.mjs` runs `gate.steps` in order (plus `subprojects` gates when their path is touched). Steps can
-be limited with `when` (globs) and `minTier`. Only one gate runs at a time on a machine
+be limited with `when` (globs) and `minTier`; `alwaysFromTier: "T3"` next to `when` makes a step run
+whenever the diff matches or the tier is at least that tier. Only one gate runs at a time on a machine
 (`gate.exclusive`), so two builds never compete.
 
 On success it posts a commit status (`gate.statusContext`, default `local-gate`) on the tested SHA.
@@ -120,7 +121,15 @@ Hooks run on every tool call in the project. Summary:
 - tool or AI attribution or an em-dash in commit messages and PR text, plus `commit.forbid` patterns;
 - editing `guard.generated` files; editing `guard.immutableOnceMerged` files once they exist on the
   integration or a protected branch;
-- reading `guard.secrets` (with `guard.allowRead` exceptions such as `.env.example`);
+- reading `guard.secrets` (with `guard.allowRead` exceptions such as `.env.example`), including a
+  recursive `grep -r` or `rg --hidden`/`-uu` over a directory that holds one: the refusal says to add
+  `--exclude='.env*'` (or `-g '!.env*'`), and the command then passes;
+- printing the whole environment (`printenv`, `env`, `export -p`, `set`, `Get-ChildItem env:`) or a
+  secret-looking variable (`printenv X_TOKEN`, `echo $API_KEY`): print only the variable you need;
+- `git worktree move` (it breaks symlinked `node_modules` and slot bindings) and
+  `gh pr merge --delete-branch` (gh switches the local checkout to the base branch; merge without it
+  and run `git push <remote> --delete <branch>` afterwards);
+- `gh pr merge` with shell variables as PR number or SHA: the guard cannot resolve them;
 - destructive commands: volume and database wipes, `rm -rf` outside `guard.removableDirs` and
   worktrees, `curl | sh`, `git clean -x`, plus `guard.denyCommands`;
 - any command carrying a `guard.databaseUrlEnv` connection string to a host outside
@@ -128,8 +137,8 @@ Hooks run on every tool call in the project. Summary:
 
 **Ask** (you get a prompt and a push notification):
 - installing, upgrading or removing packages;
-- removing worktrees;
-- editing `.claude/settings*.json`, `.claude/workflow.json` or hooks; printing the environment;
+- removing worktrees that are not finished agent slots (see Allow), and `git worktree prune`;
+- editing `.claude/settings*.json`, `.claude/workflow.json` or hooks;
 - `gh pr merge` into the integration branch when risk paths are touched, and every T3 merge;
 - pushing to a remote other than `branches.remote`; `guard.askCommands`.
 
@@ -137,10 +146,16 @@ Hooks run on every tool call in the project. Summary:
 - reading, editing in your worktree, running configured `commands`;
 - git on your own task branch (`--force-with-lease` only there);
 - `gh pr create` into any branch; `gh pr merge` into the integration branch with a green gate, a
-  current base and no risk paths.
+  current base and no risk paths; `--match-head-commit` may be a unique prefix of at least 7 hex
+  characters of the PR head;
+- `git worktree remove` (also with `--force`) and `rm -rf` of a worktree that is under
+  `worktree.root`, holds a `.agent-scope` file (made by the project's `worktree.setup`) and has an
+  empty `git status --porcelain` apart from `.agent-scope`;
+- `git push <remote> --delete <task-branch>` for non-protected branches.
 
 A stop check runs `stopCheck.commands` when an agent tries to finish with uncommitted code changes
-matching `stopCheck.codeGlobs`.
+matching `stopCheck.codeGlobs`. It is skipped while a merge, rebase, cherry-pick or revert is in
+progress, so the agent can finish resolving it.
 
 ## Notifications
 

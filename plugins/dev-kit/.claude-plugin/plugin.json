@@ -1,6 +1,6 @@
 {
   "name": "dev-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tiered task workflow for Claude Code: triage, quick fixes, build tasks, independent review, local merge gate and guard hooks, all driven by a per-project .claude/workflow.json.",
   "author": {
     "name": "Dominik Czekański",

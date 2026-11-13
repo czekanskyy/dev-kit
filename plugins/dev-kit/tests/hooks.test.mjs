@@ -67,6 +67,33 @@ describe('stop-check', () => {
     assert.match(v.reason, /^Checks failed: node -e/);
     assert.match(v.reason, /TS2322/);
   });
+  describe('operation in progress', () => {
+    for (const marker of ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD']) {
+      test(`${marker} skips all checks`, () => {
+        const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-gitdir-'));
+        if (marker.startsWith('rebase')) fs.mkdirSync(path.join(gitDir, marker));
+        else fs.writeFileSync(path.join(gitDir, marker), 'abc\n');
+        const exec = mockExec({ 'git rev-parse --git-dir': gitDir, 'git status': ' M src/a.ts\0' });
+        assert.equal(checkStop(input, { config, exec, run: () => assert.fail('should not run') }), null);
+      });
+    }
+    test('a relative git dir is resolved against the repo root', () => {
+      fs.writeFileSync(path.join(root, '.git', 'MERGE_HEAD'), 'abc\n');
+      try {
+        const exec = mockExec({ 'git rev-parse --git-dir': '.git', 'git status': ' M src/a.ts\0' });
+        assert.equal(checkStop(input, { config, exec, run: () => assert.fail('should not run') }), null);
+      } finally {
+        fs.rmSync(path.join(root, '.git', 'MERGE_HEAD'));
+      }
+    });
+    test('a clean git dir still runs the checks', () => {
+      const gitDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-gitdir-'));
+      const exec = mockExec({ 'git rev-parse --git-dir': gitDir, 'git status': ' M src/a.ts\0' });
+      const ran = [];
+      checkStop(input, { config, exec, run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      assert.equal(ran.length, 2);
+    });
+  });
   test('without stopCheck config does nothing', () => assert.equal(checkStop(input, { config: configFor(root), exec: status(' M src/a.ts\0') }), null));
   test('hook process prints block JSON', () => {
     const repo = fakeRepo();

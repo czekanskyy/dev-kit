@@ -63,6 +63,7 @@ const DB_URL_RE = /\b(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?):\
 const DESTRUCTIVE_SQL_RE = /\b(DROP\s+(DATABASE|TABLE|SCHEMA)|TRUNCATE)\b/i;
 const CLAUDE_CONFIG_GLOBS = ['**/.claude/settings.json', '**/.claude/settings.local.json', '**/.claude/workflow.json', '**/.claude/hooks/**'];
 const STATE_CHANGING_GIT = new Set(['push', 'commit', 'merge', 'rebase', 'reset', 'cherry-pick', 'revert', 'am', 'pull', 'update-ref']);
+const SHELL_VAR_NOTE = 'the guard checks the command before it runs and cannot resolve shell variables; run it with literal values (PR number, SHA).';
 const SCAN_SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'coverage', '.turbo', '.cache']);
 
 class BudgetExhausted extends Error {}
@@ -420,10 +421,43 @@ function evalGit(cmd, ctx, state, out) {
       break;
     }
     case 'worktree':
-      if (args[0] === 'remove' || args[0] === 'prune') ask(`git worktree ${args[0]} deletes a working tree. Confirm it holds nothing uncommitted.`);
+      if (args[0] === 'move') {
+        deny('git worktree move refused: moving a worktree breaks symlinked node_modules and slot bindings. Remove the worktree and create it again at the new path instead.');
+      } else if (args[0] === 'remove') {
+        const target = args.slice(1).filter((a) => !a.startsWith('-')).pop();
+        if (target === undefined || !worktreeRemovable(target, ctx, gitCwd)) {
+          ask('git worktree remove deletes a working tree. Confirm it holds nothing uncommitted (it is removed without asking only inside worktree.root, with a .agent-scope file and a clean status).');
+        }
+      } else if (args[0] === 'prune') {
+        ask('git worktree prune deletes a working tree. Confirm it holds nothing uncommitted.');
+      }
       break;
     default:
       break;
+  }
+}
+
+/**
+ * True when `target` is a finished agent worktree that may go without asking: under worktree.root
+ * (resolved against the repo root), made by the project's setup (.agent-scope file) and clean
+ * (git status --porcelain is empty, ignoring .agent-scope itself).
+ */
+export function worktreeRemovable(target, ctx, cwd) {
+  const wtRoot = ctx.config.worktree?.root;
+  if (!wtRoot || !ctx.repoRoot || typeof target !== 'string' || /[$`*?[]/.test(target)) return false;
+  const abs = toAbsolute(expandHome(target), cwd);
+  const rootAbs = toAbsolute(wtRoot, ctx.repoRoot);
+  if (!isInside(abs, rootAbs, { strict: true })) return false;
+  try {
+    if (!fs.statSync(path.join(abs, '.agent-scope')).isFile()) return false;
+    const status = String(ctx.call('git', ['-C', abs, 'status', '--porcelain'], { cwd: abs }));
+    return status
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .every((l) => /^\?\?\s+"?\.agent-scope"?$/.test(l));
+  } catch {
+    return false;
   }
 }
 
@@ -623,10 +657,18 @@ function evalPrMerge(args, ctx, state, cmd, out, globalRepo) {
   const o = parseOpts(args, { short: 'tbFAR', long: ['subject', 'body', 'body-file', 'author-email', 'match-head-commit', 'repo'] });
   if (o.flags.has('admin')) return deny('gh pr merge --admin refused: it bypasses branch protection. Get the required checks and reviews green instead.');
   if (o.flags.has('auto')) return deny('gh pr merge --auto refused: the merge must happen now, on the commit the gate checked. Merge explicitly once the gate is green.');
+  if (o.flags.has('delete-branch') || o.flags.has('d')) {
+    return deny(
+      'gh pr merge --delete-branch refused: gh then switches the local checkout (or another worktree) to the base branch. Merge without it, then delete the remote branch with git push <remote> --delete <branch>.',
+    );
+  }
   const texts = [...(o.values.t ?? []), ...(o.values.subject ?? []), ...(o.values.b ?? []), ...(o.values.body ?? [])];
   for (const f of [...(o.values.F ?? []), ...(o.values['body-file'] ?? [])]) texts.push(readMessageFile(f, state.cwd, cmd));
   checkMessage(texts, 'Merge commit text', config, out);
   if (configBroken(ctx, 'gh pr merge', out)) return;
+  if ([o.pos[0], o.values['match-head-commit']?.[0], o.values.R?.[0], o.values.repo?.[0], globalRepo].some((v) => typeof v === 'string' && /[$`]|%\w+%/.test(v))) {
+    return deny(`gh pr merge refused: ${SHELL_VAR_NOTE}`);
+  }
 
   const repo = o.values.R?.[0] ?? o.values.repo?.[0] ?? globalRepo;
   const repoArgs = repo ? ['--repo', repo] : [];
@@ -643,7 +685,8 @@ function evalPrMerge(args, ctx, state, cmd, out, globalRepo) {
   const sha = pr.headRefOid;
   const short = String(sha).slice(0, 12);
   const mhc = o.values['match-head-commit']?.[0];
-  if (!mhc || mhc !== sha) {
+  const mhcOk = typeof mhc === 'string' && (mhc === sha || (mhc.length >= 7 && /^[0-9a-f]+$/i.test(mhc) && String(sha).toLowerCase().startsWith(mhc.toLowerCase())));
+  if (!mhcOk) {
     deny(`gh pr merge refused: add --match-head-commit ${sha} so the merge fails if the branch moves after this check.`);
   }
   if (!br.integration || base !== br.integration) return;
@@ -756,7 +799,7 @@ function secretHit(arg, ctx, cwd) {
 }
 
 /** First secret file found under dir (bounded walk), or null. */
-export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6 } = {}) {
+export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6, skip = null } = {}) {
   const config = ctx.config;
   const opts = { cwd: dir, root: ctx.repoRoot };
   if (isSecretPath(dir, config, opts)) return dir;
@@ -774,14 +817,70 @@ export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6 } = 
       if (++seen > maxEntries) return null;
       const p = path.join(d, e.name);
       if (e.isDirectory()) {
+        if (skip?.(p, true)) continue;
         if (!SCAN_SKIP_DIRS.has(e.name) && depth < maxDepth) queue.push([p, depth + 1]);
         if (isSecretPath(path.join(p, 'x'), config, opts)) return p;
-      } else if (isSecretPath(p, config, opts)) {
+      } else if (isSecretPath(p, config, opts) && !skip?.(p, false)) {
         return p;
       }
     }
   }
   return null;
+}
+
+/** fnmatch-style glob (* ? [..]) as a RegExp over one name. */
+function nameGlobRe(g) {
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    const close = c === '[' ? g.indexOf(']', i + 2) : -1;
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (close > 0) {
+      re += `[${g.slice(i + 1, close).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
+      i = close;
+    } else re += c.replace(/[.+^${}()|\\[\]]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`, process.platform === 'win32' ? 'i' : '');
+}
+
+/**
+ * Exclusions a recursive search already carries: grep --exclude/--exclude-dir, rg negative globs
+ * (-g '!x'). Returns the argv without those option values, plus the name globs to test hits against.
+ */
+function searchExcludes(b, argv) {
+  const rest = [argv[0]];
+  const globs = [];
+  const take = (v) => {
+    if (v === undefined) return;
+    if (b === 'rg') {
+      if (v.startsWith('!')) globs.push(v.slice(1).replace(/\/+$/, '').replace(/^(\*\*\/|\/)+/, '').split('/').pop());
+    } else globs.push(v);
+  };
+  const longs = b === 'rg' ? ['glob', 'iglob'] : ['exclude', 'exclude-dir', 'exclude-from'];
+  for (let k = 1; k < argv.length; k++) {
+    const a = argv[k];
+    if (a === '--') {
+      rest.push(...argv.slice(k));
+      break;
+    }
+    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
+    if (m && longs.includes(m[1])) {
+      const v = m[2] !== undefined ? m[2] : argv[++k];
+      if (m[1] !== 'exclude-from') take(v);
+      continue;
+    }
+    if (b === 'rg' && a === '-g') {
+      take(argv[++k]);
+      continue;
+    }
+    if (b === 'rg' && /^-g./.test(a)) {
+      take(a.slice(2));
+      continue;
+    }
+    rest.push(a);
+  }
+  return { argv: rest, res: globs.filter(Boolean).map(nameGlobRe) };
 }
 
 function evalSecrets(cmd, ctx, state, out) {
@@ -792,15 +891,17 @@ function evalSecrets(cmd, ctx, state, out) {
       decision: 'deny',
       reason: `Reading secret file "${what}" refused. Ask the user for the specific non-secret value you need, or read the example file (.env.example) instead.`,
     });
-  const ask = (reason) => out.push({ decision: 'ask', reason });
+  const denyWith = (reason) => out.push({ decision: 'deny', reason });
   for (const r of cmd.redirects) {
     if (r.op === '<' || r.op === '<>') {
       const hit = secretHit(r.target, ctx, state.cwd);
       if (hit) deny(hit);
     }
   }
+  const isSearch = b === 'rg' || b === 'grep' || b === 'egrep' || b === 'fgrep';
+  const excl = isSearch ? searchExcludes(b, cmd.argv) : { argv: cmd.argv, res: [] };
   if (READERS.has(b)) {
-    for (const a of pathArgs(cmd.argv)) {
+    for (const a of pathArgs(excl.argv)) {
       const hit = secretHit(a, ctx, state.cwd);
       if (hit) {
         deny(hit);
@@ -809,8 +910,8 @@ function evalSecrets(cmd, ctx, state, out) {
     }
   }
   // Recursive search that reads hidden or ignored files.
-  if (b === 'rg' || b === 'grep' || b === 'egrep' || b === 'fgrep') {
-    const args = cmd.argv.slice(1);
+  if (isSearch) {
+    const args = excl.argv.slice(1);
     let reads = false;
     if (b === 'rg') {
       const uCount = args.filter((a) => /^-[a-zA-Z]*u/.test(a) && !a.startsWith('--')).reduce((n, a) => n + (a.match(/u/g) ?? []).length, 0);
@@ -819,7 +920,7 @@ function evalSecrets(cmd, ctx, state, out) {
       reads = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) && !a.startsWith('--')) || args.includes('--recursive') || args.includes('--dereference-recursive');
     }
     if (reads) {
-      const dirs = pathArgs(cmd.argv).filter((p) => {
+      const dirs = pathArgs(excl.argv).filter((p) => {
         try {
           return fs.statSync(toAbsolute(expandHome(p), state.cwd)).isDirectory();
         } catch {
@@ -828,30 +929,46 @@ function evalSecrets(cmd, ctx, state, out) {
       });
       const targets = dirs.length ? dirs : ['.'];
       for (const d of targets) {
-        const hit = findSecretUnder(toAbsolute(expandHome(d), state.cwd), ctx);
+        const searchRoot = normalizePath(toAbsolute(expandHome(d), state.cwd));
+        const skip = excl.res.length
+          ? (p, isDir) => {
+              const rel = relativeTo(normalizePath(p), searchRoot).split('/');
+              return isDir ? excl.res.some((re) => re.test(rel[rel.length - 1])) : excl.res.some((re) => rel.some((seg) => re.test(seg)));
+            }
+          : null;
+        const hit = findSecretUnder(toAbsolute(expandHome(d), state.cwd), ctx, { skip });
         if (hit) {
-          ask(`${b} over "${d}" also reads hidden or ignored files, and that directory holds a secret file (${normalizePath(hit)}). Narrow the search, or confirm.`);
+          const fix =
+            b === 'rg'
+              ? "drop --hidden/-uu/--no-ignore, or add -g '!.env*' (and a negative glob for the other secret patterns)"
+              : "add --exclude='.env*' (and other secret patterns) or narrow the path";
+          denyWith(`${b} over "${d}" would read a secret file (${normalizePath(hit)}). Refused: ${fix}.`);
           break;
         }
       }
     }
   }
   const args = cmd.argv.slice(1);
+  const dumpMsg = (what) => `${what} prints every environment variable, secrets included. Print only the variable you need, e.g. printenv NODE_ENV.`;
+  const secretVar = (what, name) => `${what}: ${name} looks like a secret. Ask the user for the value instead.`;
   if (b === 'printenv') {
-    if (!args.length) ask('printenv without arguments prints every environment variable, secrets included. Confirm, or print only the variable you need.');
-    else if (args.some((a) => SECRET_ENV_RE.test(a))) ask(`printenv ${args.join(' ')}: the variable looks like a secret. Confirm you need its value.`);
+    if (!args.length) denyWith(dumpMsg('printenv without arguments'));
+    else {
+      const bad = args.find((a) => SECRET_ENV_RE.test(a));
+      if (bad) denyWith(secretVar(`printenv ${args.join(' ')}`, bad));
+    }
   }
-  if (b === 'env' && cmd.argv.length === 1) ask('env without a command prints every environment variable, secrets included. Confirm, or print only the variable you need.');
+  if (b === 'env' && cmd.argv.length === 1) denyWith(dumpMsg('env without a command'));
   if ((b === 'export' || b === 'declare' || b === 'typeset') && (args.length === 0 || (args.length === 1 && /^-[px]+$/.test(args[0])))) {
-    ask(`${b} ${args.join(' ')} prints every exported variable, secrets included. Confirm.`);
+    denyWith(dumpMsg(`${b} ${args.join(' ')}`.trim()));
   }
-  if (b === 'set' && args.length === 0 && !ps) ask('set without arguments prints every shell variable, secrets included. Confirm.');
-  if (['get-childitem', 'gci', 'ls', 'dir'].includes(b) && args.some((a) => /^env:\\?$/i.test(a))) ask(`${b} env: prints every environment variable, secrets included. Confirm.`);
+  if (b === 'set' && args.length === 0 && !ps) denyWith(dumpMsg('set without arguments'));
+  if (['get-childitem', 'gci', 'ls', 'dir'].includes(b) && args.some((a) => /^env:\\?$/i.test(a))) denyWith(dumpMsg(`${b} env:`));
   if (b === 'echo' || b === 'printf' || b === 'print' || b === 'write-output' || b === 'write-host') {
     for (const a of args) {
       for (const m of a.matchAll(/\$(?:env:)?\{?([A-Za-z_][A-Za-z0-9_]*)/gi)) {
         if (SECRET_ENV_RE.test(m[1])) {
-          ask(`${b} of $${m[1]}: the variable looks like a secret. Confirm you need its value printed.`);
+          denyWith(secretVar(`${b} of $${m[1]}`, m[1]));
           break;
         }
       }
@@ -865,7 +982,7 @@ export function classifyRemoval(target, ctx, cwd) {
   const removable = new Set((config.guard?.removableDirs ?? []).map((d) => d.toLowerCase()));
   const t = expandHome(target);
   if (t === '' || t === '{}' || /\$/.test(t)) {
-    return { decision: 'ask', reason: `Recursive delete of "${target}": the path depends on a variable or placeholder and cannot be checked. Confirm the exact target.` };
+    return { decision: 'ask', reason: `Recursive delete of "${target}": the path depends on a variable or placeholder and cannot be checked. Run it with the literal path (the guard checks the command before it runs and cannot resolve shell variables), or confirm the exact target.` };
   }
   const abs = toAbsolute(t, cwd);
   const lc = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
@@ -877,6 +994,7 @@ export function classifyRemoval(target, ctx, cwd) {
   try {
     const gitFile = path.join(abs, '.git');
     if (fs.existsSync(gitFile) && fs.statSync(gitFile).isFile()) {
+      if (worktreeRemovable(target, ctx, cwd)) return null;
       return { decision: 'ask', reason: `Recursive delete of "${target}" removes a git worktree. Prefer git worktree remove; confirm it holds nothing uncommitted.` };
     }
   } catch {

@@ -95,8 +95,11 @@ guard refuses.
 ## 8. Merge per tier
 
 Merge command (never `--auto`; the guard pins the merge to the gated commit):
-`gh pr merge <n> --squash --delete-branch --match-head-commit <sha>`, where `<sha>` is
-`gh pr view <n> --json headRefOid --jq .headRefOid`.
+`gh pr merge <n> --squash --match-head-commit <sha>`, where `<sha>` is
+`gh pr view <n> --json headRefOid --jq .headRefOid` (a unique prefix of at least 7 characters works
+too). Use literal values for `<n>` and `<sha>`: the guard checks the command before it runs and
+cannot resolve shell variables. Never add `--delete-branch`: gh would switch the local checkout (or
+another worktree) to the base branch, so the guard refuses it.
 
 - Hotfix (base is a protected branch): never merge. Report the PR link for the user.
 - T0 to T2 without risk paths: run the merge command. You merge.
@@ -106,8 +109,11 @@ Merge command (never `--auto`; the guard pins the merge to the gated commit):
 - If the guard refuses (stale base: fetch, rebase, gate again; missing status: gate again), fix the
   cause and retry. Never bypass it.
 
-After merging: `git fetch` and update the local integration branch, run `worktree.sync` if set,
-notify `--priority low` with the PR link. Leave worktree removal to the user (it asks anyway).
+After merging: delete the remote task branch with `git push <remote> --delete <branch>` (allowed for
+non-protected branches), `git fetch` and update the local integration branch, run `worktree.sync`
+if set, notify `--priority low` with the PR link. Remove the task worktree with
+`git worktree remove <path>`: the guard allows it without asking only when the worktree is under
+`worktree.root`, holds a `.agent-scope` file and is clean; otherwise it asks. Never move a worktree.
 
 ## Usage limits
 

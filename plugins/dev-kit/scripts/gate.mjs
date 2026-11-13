@@ -43,7 +43,7 @@ export function resolveSteps({ config, repoRoot, changedFiles, tier = 'T3', only
     let skip = null;
     if (!run) skip = 'no command configured';
     else if (obj.minTier && tierIdx < TIERS.indexOf(obj.minTier)) skip = `needs ${obj.minTier}`;
-    else if (obj.when?.length && files) {
+    else if (obj.when?.length && files && !(obj.alwaysFromTier && tierIdx >= TIERS.indexOf(obj.alwaysFromTier))) {
       const scoped = scope ? files.filter((f) => f.startsWith(`${scope}/`)).map((f) => f.slice(scope.length + 1)) : files;
       if (!scoped.some((f) => anyGlob(obj.when, f, { root: scope ? path.join(root, scope) : root }))) skip = 'diff does not touch its paths';
     }
@@ -325,6 +325,9 @@ async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
     }
     if (dirty.length) {
       log(`gate: refusing --post-status: the working tree has uncommitted changes (${dirty.slice(0, 5).join(', ')}${dirty.length > 5 ? ', ...' : ''}). Commit them so the tested state equals the commit.`);
+      if (dirty.some((f) => f === '.claude/worktrees' || f.startsWith('.claude/worktrees/'))) {
+        log('gate: hint: agent worktrees live under .claude/worktrees: add /.claude/worktrees/ to .gitignore.');
+      }
       return 1;
     }
     if (!sha) {

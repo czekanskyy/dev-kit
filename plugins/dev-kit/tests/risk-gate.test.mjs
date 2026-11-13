@@ -92,6 +92,28 @@ describe('gate step selection', () => {
   test('unknown diff runs every conditional step', () => {
     assert.deepEqual(names(resolveSteps({ config, changedFiles: null, tier: 'T3' })), ['lint', 'test', 'e2e', 'migrations-check', 'packages/mobile: mobile-test']);
   });
+  describe('alwaysFromTier', () => {
+    const cfg = configFor(os.tmpdir(), {
+      ...PROJECT,
+      gate: { steps: [{ name: 'migrations-check', run: 'node -e "2"', when: ['src/migrations/**'], alwaysFromTier: 'T3' }] },
+      subprojects: [],
+    });
+    const run = (tier, files) => names(resolveSteps({ config: cfg, changedFiles: files, tier }));
+    test('runs without a matching diff at or above the tier', () => {
+      assert.deepEqual(run('T3', ['src/app.ts']), ['migrations-check']);
+    });
+    test('skips without a matching diff below the tier', () => {
+      assert.deepEqual(run('T2', ['src/app.ts']), []);
+      assert.deepEqual(run('T0', ['src/app.ts']), []);
+    });
+    test('still runs below the tier when the globs match', () => {
+      assert.deepEqual(run('T1', ['src/migrations/002.sql']), ['migrations-check']);
+    });
+    test('minTier still wins', () => {
+      const c = configFor(os.tmpdir(), { ...PROJECT, gate: { steps: [{ run: 'node -e "2"', when: ['x/**'], minTier: 'T3', alwaysFromTier: 'T1' }] }, subprojects: [] });
+      assert.deepEqual(names(resolveSteps({ config: c, changedFiles: ['y'], tier: 'T2' })), []);
+    });
+  });
   test('--only selects one step', () => assert.deepEqual(names(resolveSteps({ config, changedFiles: [], tier: 'T3', only: 'test' })), ['test']));
   test('bad tier throws', () => assert.throws(() => resolveSteps({ config, changedFiles: [], tier: 'T9' })));
 });
@@ -133,6 +155,19 @@ describe('gate CLI', () => {
     const r = gate('--post-status');
     assert.equal(r.status, 1);
     assert.match(r.stdout, /uncommitted changes/);
+    git(root, 'checkout', '--', 'src/app.ts');
+  });
+  test('--post-status hints at .gitignore for agent worktrees', () => {
+    write(root, '.claude/worktrees/slot-1/file.txt', 'x\n');
+    const r = gate('--post-status');
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /add \/\.claude\/worktrees\/ to \.gitignore/);
+    fs.rmSync(path.join(root, '.claude', 'worktrees'), { recursive: true });
+  });
+  test('--post-status gives no worktree hint for other dirty paths', () => {
+    write(root, 'src/app.ts', '3\n');
+    const r = gate('--post-status');
+    assert.doesNotMatch(r.stdout, /worktrees/);
     git(root, 'checkout', '--', 'src/app.ts');
   });
   test('--post-status refuses a commit that is not pushed', () => {

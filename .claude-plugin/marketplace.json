@@ -6,14 +6,14 @@
   },
   "description": "One orchestrator, four task tiers and hard local gates for Claude Code projects.",
   "metadata": {
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "dev-kit",
       "source": "./plugins/dev-kit",
       "description": "Tiered task workflow for Claude Code: triage, quick fixes, build tasks, independent review, local merge gate and guard hooks, all driven by a per-project .claude/workflow.json.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "development",
       "tags": ["workflow", "orchestration", "code-review", "git", "hooks", "quality-gate"]
     }

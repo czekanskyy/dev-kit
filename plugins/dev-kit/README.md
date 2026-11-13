@@ -35,6 +35,9 @@ later. Known gaps:
 - The words `codex` and `copilot` are refused in commit and PR text even inside SDK or package names (on purpose).
 - Interpreters (`node -e`, `python -c`, `perl`) and scripts the agent writes and runs can do anything the guard refuses.
 - Variables and indirection (`X=main; git push origin $X`, `$(echo cat) .env`, aliases, functions, base64) hide commands.
+  The guard checks a command before it runs and cannot resolve shell variables, so `gh pr merge $n ...` is refused: use literal values.
+- `--exclude`/`-g '!glob'` exclusions are matched by file or directory name only; a path glob such as `src/**/.env` is reduced to its last segment.
+- A worktree counts as a finished agent slot only with a `.agent-scope` file and a clean status; `rm -rf` of it is not unregistered from git, use `git worktree remove`.
 - Text piped into a shell (`echo "..." | bash`) is not inspected; only a download piped into one is.
 - Git aliases (`git p` for push) are not expanded; hook or config edits through the Edit tool only ask.
 - `cd` inside a subshell or `bash -c` leaks into the following commands of the same line.
