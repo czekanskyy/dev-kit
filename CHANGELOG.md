@@ -4,12 +4,10 @@
 
 Fewer interruptions where the agent can fix the problem itself, plus fixes from real use.
 
-- Guard: a recursive `grep -r` or `rg --hidden`/`-uu` over a directory holding a secret file is now
-  denied with the fix (`--exclude='.env*'`, `-g '!.env*'`) and allowed only when the command carries
-  a narrow, trusted exclusion: a bare basename glob matched case-sensitively (grep `--exclude`, rg
-  negative `-g`), with no `--include*`, `--exclude-from`, `-L`, `--iglob` or later positive glob.
-  Path-qualified globs and `--exclude-dir` never count, and neither does anything that could be an
-  option value (a `-e`/`--regexp`/`-f` value starting with a dash voids the exclusion).
+- Guard: a recursive `grep` (`-r`, `-R`, `--recursive`, `--dereference-recursive`) or an `rg` that reads
+  hidden or ignored files (`--hidden`, `-u` twice or more including combined flags such as `-uug`,
+  `--no-ignore*`) over a directory holding a secret file is denied with an instruction: use
+  `git grep <pattern>` or plain `rg <pattern>`, or narrow the path. Exclusion flags are not trusted.
 - Guard: dumping the environment (`printenv`, `env`, `export -p`, `set`, `Get-ChildItem env:`) or
   printing a secret-looking variable is denied with an instruction instead of asking.
 - Guard: `git worktree remove` and `rm -rf` of a finished agent worktree no longer ask: real path

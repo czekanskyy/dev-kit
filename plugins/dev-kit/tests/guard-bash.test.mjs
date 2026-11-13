@@ -381,73 +381,48 @@ describe('recursive search over a directory holding secrets', () => {
   const reason = (c) => evaluateBash(c, { cwd: repo, config: cfg, exec: mockExec(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {} }).reason;
   test('rg --hidden denied', () => assert.equal(run('rg --hidden KEY .'), 'deny'));
   test('rg -uu denied', () => assert.equal(run('rg -uu KEY'), 'deny'));
+  test('rg --hidden denied', () => assert.equal(run('rg --hidden KEY .'), 'deny'));
+  test('rg -uu denied', () => assert.equal(run('rg -uu KEY'), 'deny'));
   test('rg --no-ignore denied', () => assert.equal(run('rg --no-ignore KEY .'), 'deny'));
   test('grep -r denied', () => assert.equal(run('grep -rn KEY .'), 'deny'));
-  test('grep -r denial tells how to fix it', () => assert.match(reason('grep -rn KEY .'), /--exclude='\.env\*'/));
-  test('rg denial tells how to fix it', () => assert.match(reason('rg --hidden KEY .'), /-g '!\.env\*'/));
+  test('grep denial points to git grep, plain rg or a narrower path', () => {
+    const r = reason('grep -rn KEY .');
+    assert.match(r, /git grep <pattern>/);
+    assert.match(r, /plain `rg <pattern>`/);
+    assert.match(r, /narrow the path/);
+  });
+  test('rg denial says to drop the flags', () => assert.match(reason('rg --hidden KEY .'), /drop --hidden\/-uu\/--no-ignore; plain rg skips ignored files such as \.env/));
   for (const c of [
+    // exclusions are never trusted any more
     "grep -rn KEY --exclude='.env*' .",
-    'grep -rn KEY --exclude=.env* .',
     "grep -rn KEY --exclude '.env*' .",
-    "grep -rn --exclude='.env' KEY",
-    "rg --hidden KEY -g '!.env*' .",
-    "rg --hidden KEY --glob '!.env*'",
-    'rg -uu KEY --glob=!.env',
-    "rg --hidden -g'!.env*' KEY",
-    "rg --hidden KEY -g '.env*' -g '!.env*' .",
-    "rg --hidden -g '!.env*' -e KEY .",
-    "grep -rn -m 5 -e KEY --exclude='.env*' .",
-    "rg --hidden -t js -g '!.env*' KEY .",
-    "rg --hidden -A 2 -g '!.env*' KEY .",
-  ]) {
-    test(`allowed with the secret excluded: ${c}`, () => assert.equal(run(c), 'allow'));
-  }
-  for (const c of [
-    "grep -rn KEY --exclude='*.log' .",
-    "rg --hidden KEY -g '!*.log' .",
-    "rg --hidden KEY -g '.env*' .",
-    // finding 3: --exclude-dir never covers files
     'grep -rn KEY --exclude-dir=.env .',
-    // finding 1: path-qualified globs never count
-    "rg --hidden KEY -g '!src/.env*' .",
-    "rg --hidden -g'!**/.env*' KEY",
-    "grep -rn KEY --exclude='./.env' .",
-    "grep -rn KEY --exclude='*/.env' .",
-    // finding 2: a later positive glob cancels the negative one
-    "rg --hidden KEY -g '!.env*' -g '.env*' .",
-    "rg --hidden KEY --glob '!.env*' --glob='*' .",
-    // finding 4: always case-sensitive, --iglob never counts
-    "grep -rn KEY --exclude='.ENV*' .",
-    "rg --hidden KEY -g '!.ENV' .",
-    "rg --hidden KEY -g '!.env*' --iglob '*' .",
-    "rg --hidden KEY --iglob '!.env*' .",
-    'rg --hidden KEY -g "!.env*" --glob-case-insensitive .',
-    // other switches that void the exclusion
-    "grep -rn KEY --exclude='.env*' --include='*' .",
-    "grep -rn KEY --exclude='.env*' --include-dir=src .",
-    "grep -rn KEY --exclude='.env*' --exclude-from=list.txt .",
-    "grep -rnL KEY --exclude='.env*' .",
-    "grep --dereference-recursive KEY --exclude='.env*' .",
-    "rg --hidden -L KEY -g '!.env*' .",
+    "rg --hidden KEY -g '!.env*' .",
+    "rg --hidden KEY --glob '!.env*' .",
+    "rg -uu KEY --glob=!.env",
+    // round 3 bypasses
+    "rg -uug '!README.md' KEY .",
+    "rg -uu -g '!README.md' KEY .",
+    "grep -rn --exclude='.env*' --color --include='*' KEY .",
+    "grep -rn --exclude='.env*' --colour --include='*' KEY .",
     // option values that imitate exclusions
     "rg --hidden -e '-g!.env*' -e KEY .",
     "grep -rn -e '--exclude=.env*' -e KEY .",
-    "rg --hidden --regexp='-g!.env*' .",
-    "rg --hidden --regexp '-g!.env*' .",
-    "grep -rn --regexp=--exclude=.env* .",
-    "rg --hidden -e-g!.env* .",
-    "grep -rn -e--exclude=.env* .",
-    "rg --hidden -f '-g!.env*' .",
-    "grep -rn --file=--exclude=.env* .",
-    "grep -rn -m 1 -e '--exclude=.env*' .",
     "rg --hidden -- '-g!.env*' .",
-    "grep -rn -- '--exclude=.env*' .",
-    "rg -t '-g!.env*' --hidden KEY .",
-    // naming the secret explicitly
-    "grep -rn KEY --exclude='.env*' .env .",
-    "rg --hidden KEY -g '!.env*' .env",
+    // other recursive forms and combined flags
+    'grep -R KEY .',
+    'grep --recursive KEY .',
+    'grep --dereference-recursive KEY .',
+    'grep -rnL KEY .',
+    'rg -uuu KEY .',
+    'rg -u -u KEY .',
+    'rg -nuu KEY .',
+    'rg --no-ignore-vcs KEY .',
   ]) {
-    test(`denied despite the exclusion: ${c}`, () => assert.equal(run(c), 'deny'));
+    test(`denied: ${c}`, () => assert.equal(run(c), 'deny'));
+  }
+  for (const c of ['git grep KEY', 'git grep -n KEY -- src', 'rg KEY .', 'rg -n KEY', 'rg -u KEY .', 'grep KEY src/a.ts', 'grep -rn KEY src']) {
+    test(`allowed: ${c}`, () => assert.equal(run(c), 'allow'));
   }
   test('plain rg allowed', () => assert.equal(run('rg KEY .'), 'allow'));
   test('grep -r in a clean subdir allowed', () => assert.equal(run('grep -r KEY src'), 'allow'));

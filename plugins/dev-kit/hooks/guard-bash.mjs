@@ -834,7 +834,7 @@ function secretHit(arg, ctx, cwd) {
 }
 
 /** First secret file found under dir (bounded walk), or null. */
-export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6, skip = null } = {}) {
+export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6 } = {}) {
   const config = ctx.config;
   const opts = { cwd: dir, root: ctx.repoRoot };
   if (isSecretPath(dir, config, opts)) return dir;
@@ -852,133 +852,14 @@ export function findSecretUnder(dir, ctx, { maxEntries = 5000, maxDepth = 6, ski
       if (++seen > maxEntries) return null;
       const p = path.join(d, e.name);
       if (e.isDirectory()) {
-        if (skip?.(p, true)) continue;
         if (!SCAN_SKIP_DIRS.has(e.name) && depth < maxDepth) queue.push([p, depth + 1]);
         if (isSecretPath(path.join(p, 'x'), config, opts)) return p;
-      } else if (isSecretPath(p, config, opts) && !skip?.(p, false)) {
+      } else if (isSecretPath(p, config, opts)) {
         return p;
       }
     }
   }
   return null;
-}
-
-/** fnmatch-style glob (* ? [..]) as a RegExp over one name. */
-function nameGlobRe(g) {
-  let re = '';
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    const close = c === '[' ? g.indexOf(']', i + 2) : -1;
-    if (c === '*') re += '.*';
-    else if (c === '?') re += '.';
-    else if (close > 0) {
-      re += `[${g.slice(i + 1, close).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
-      i = close;
-    } else re += c.replace(/[.+^${}()|\\[\]]/g, '\\$&');
-  }
-  return new RegExp('^' + re + '$');
-}
-
-const GREP_VALUE_SHORT = 'efmABCdD';
-const RG_VALUE_SHORT = 'efgmABCtTjMErd';
-const GREP_VALUE_LONG = new Set(['regexp', 'file', 'max-count', 'after-context', 'before-context', 'context', 'devices', 'directories', 'label', 'binary-files', 'color', 'colour']);
-const RG_VALUE_LONG = new Set([
-  'regexp', 'file', 'max-count', 'after-context', 'before-context', 'context', 'type', 'type-not', 'type-add', 'type-clear', 'threads', 'max-columns',
-  'encoding', 'replace', 'max-depth', 'maxdepth', 'max-filesize', 'color', 'colors', 'sort', 'sortr', 'path-separator', 'pre', 'pre-glob', 'engine',
-  'ignore-file', 'field-context-separator', 'field-match-separator', 'context-separator', 'dfa-size-limit', 'regex-size-limit', 'hostname-bin', 'hyperlink-format',
-]);
-
-/**
- * Exclusions a recursive search carries that the guard trusts. Deliberately narrow:
- * - grep: --exclude=<bare basename glob> (--exclude-dir never counts for files); any --include*,
- *   --exclude-from, -L or --dereference-recursive switches the trust off.
- * - rg: -g/--glob '!<bare basename glob>' with no later positive glob; --iglob,
- *   --glob-case-insensitive and -L/--follow switch the trust off.
- * - Arguments consumed by value-taking options and everything after -- are values, never flags.
- *   A pattern or pattern-file value (-e, --regexp, -f, --file) that starts with a dash switches the
- *   trust off, because it could imitate an option.
- * Globs containing a slash never count. Matching is always case-sensitive.
- * Returns the argv without those option values, plus the regexes a secret file's basename must match.
- */
-function searchExcludes(b, argv) {
-  const rest = [argv[0]];
-  const globs = []; // rg: {neg, glob}; grep: {neg: true, glob}
-  const valueShort = b === 'rg' ? RG_VALUE_SHORT : GREP_VALUE_SHORT;
-  const valueLong = b === 'rg' ? RG_VALUE_LONG : GREP_VALUE_LONG;
-  let off = false;
-  for (let k = 1; k < argv.length; k++) {
-    const a = argv[k];
-    if (a === '--') {
-      rest.push(...argv.slice(k));
-      break;
-    }
-    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
-    if (m) {
-      const name = m[1];
-      const val = () => (m[2] !== undefined ? m[2] : argv[++k]);
-      if (b === 'rg' && name === 'glob') {
-        const v = String(val());
-        globs.push({ neg: v.startsWith('!'), glob: v });
-      } else if (b === 'rg' && name === 'iglob') {
-        val();
-        off = true;
-      } else if (b === 'rg' && (name === 'follow' || name === 'glob-case-insensitive')) off = true;
-      else if (b !== 'rg' && name === 'exclude') globs.push({ neg: true, glob: String(val()) });
-      else if (b !== 'rg' && name === 'exclude-dir') val();
-      else if (b !== 'rg' && (name === 'exclude-from' || name.startsWith('include') || name === 'dereference-recursive')) {
-        off = true;
-        if (name === 'dereference-recursive') rest.push(a);
-        else if (m[2] === undefined) k++;
-      } else if (valueLong.has(name)) {
-        const v = String(val() ?? '');
-        if ((name === 'regexp' || name === 'file') && v.startsWith('-')) off = true;
-        rest.push(m[2] !== undefined ? a : `--${name}`);
-        if (m[2] === undefined) rest.push(v);
-      } else rest.push(a);
-      continue;
-    }
-    if (/^-[A-Za-z0-9]/.test(a)) {
-      let consumed = null;
-      let extra = null;
-      for (let j = 1; j < a.length; j++) {
-        const ch = a[j];
-        if (ch === 'L') off = true;
-        if (b === 'rg' && ch === 'g') {
-          const v = a.length > j + 1 ? a.slice(j + 1) : String(argv[++k] ?? '');
-          globs.push({ neg: v.startsWith('!'), glob: v });
-          consumed = 'glob';
-          break;
-        }
-        if (valueShort.includes(ch)) {
-          const attached = a.slice(j + 1);
-          const v = attached || String(argv[++k] ?? '');
-          if ((ch === 'e' || ch === 'f') && v.startsWith('-')) off = true;
-          consumed = 'value';
-          if (!attached) extra = v;
-          break;
-        }
-      }
-      if (consumed !== 'glob') {
-        rest.push(a);
-        if (extra !== null) rest.push(extra);
-      }
-      continue;
-    }
-    rest.push(a);
-  }
-  let res = [];
-  if (!off) {
-    const valid = [];
-    globs.forEach((g, i) => {
-      if (!g.neg) return;
-      const name = b === 'rg' ? g.glob.slice(1) : g.glob;
-      if (!name || name.includes('/')) return;
-      if (b === 'rg' && globs.slice(i + 1).some((later) => !later.neg)) return;
-      valid.push(name);
-    });
-    res = valid.map(nameGlobRe);
-  }
-  return { argv: rest, res };
 }
 
 function evalSecrets(cmd, ctx, state, out) {
@@ -997,9 +878,8 @@ function evalSecrets(cmd, ctx, state, out) {
     }
   }
   const isSearch = b === 'rg' || b === 'grep' || b === 'egrep' || b === 'fgrep';
-  const excl = isSearch ? searchExcludes(b, cmd.argv) : { argv: cmd.argv, res: [] };
   if (READERS.has(b)) {
-    for (const a of pathArgs(excl.argv)) {
+    for (const a of pathArgs(cmd.argv)) {
       const hit = secretHit(a, ctx, state.cwd);
       if (hit) {
         deny(hit);
@@ -1009,7 +889,7 @@ function evalSecrets(cmd, ctx, state, out) {
   }
   // Recursive search that reads hidden or ignored files.
   if (isSearch) {
-    const args = excl.argv.slice(1);
+    const args = cmd.argv.slice(1);
     let reads = false;
     if (b === 'rg') {
       const uCount = args.filter((a) => /^-[a-zA-Z]*u/.test(a) && !a.startsWith('--')).reduce((n, a) => n + (a.match(/u/g) ?? []).length, 0);
@@ -1018,7 +898,7 @@ function evalSecrets(cmd, ctx, state, out) {
       reads = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) && !a.startsWith('--')) || args.includes('--recursive') || args.includes('--dereference-recursive');
     }
     if (reads) {
-      const dirs = pathArgs(excl.argv).filter((p) => {
+      const dirs = pathArgs(cmd.argv).filter((p) => {
         try {
           return fs.statSync(toAbsolute(expandHome(p), state.cwd)).isDirectory();
         } catch {
@@ -1027,14 +907,12 @@ function evalSecrets(cmd, ctx, state, out) {
       });
       const targets = dirs.length ? dirs : ['.'];
       for (const d of targets) {
-        // Only a secret FILE can be excluded, by its basename. Directories never are.
-        const skip = excl.res.length ? (p, isDir) => !isDir && excl.res.some((re) => re.test(path.basename(p))) : null;
-        const hit = findSecretUnder(toAbsolute(expandHome(d), state.cwd), ctx, { skip });
+        const hit = findSecretUnder(toAbsolute(expandHome(d), state.cwd), ctx);
         if (hit) {
           const fix =
             b === 'rg'
-              ? "drop --hidden/-uu/--no-ignore, or add -g '!.env*' (and a negative glob for the other secret patterns)"
-              : "add --exclude='.env*' (and other secret patterns) or narrow the path";
+              ? 'drop --hidden/-uu/--no-ignore; plain rg skips ignored files such as .env'
+              : 'Use `git grep <pattern>` (tracked files only) or plain `rg <pattern>` (skips ignored files such as .env); or narrow the path to a directory without secrets';
           denyWith(`${b} over "${d}" would read a secret file (${normalizePath(hit)}). Refused: ${fix}.`);
           break;
         }
