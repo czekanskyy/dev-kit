@@ -85,4 +85,4 @@ Verdict: APPROVE | CHANGES
 
 **Next step:** fix the blockers and majors, or merge if approved.
 Prompt: `/dev-kit:build-task fix review findings on <branch>: <numbered findings>`
-Prompt: `Merge PR <n> into the integration branch (gh pr merge with --match-head-commit)`
+Prompt: `Merge PR <n> into the integration branch (gh pr merge with --match-head-commit, without --delete-branch; then git push <remote> --delete <branch>)`

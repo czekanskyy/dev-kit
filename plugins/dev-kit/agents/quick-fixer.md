@@ -30,6 +30,8 @@ You make one small, cosmetic change and commit it. Nothing else.
 - Commit with exactly the message from the brief: `git add <files>` then `git commit -m "<message>"`.
   No tool or AI attribution, no em-dash, no `--no-verify`.
 - Never push, merge, rebase, switch branches or touch a protected or integration branch.
+- Keep helper scripts and scratch files in your own temp or scratch directory, never a shared `/tmp`.
+  Never run a script you did not write yourself. Never move a worktree.
 
 ## Report format
 

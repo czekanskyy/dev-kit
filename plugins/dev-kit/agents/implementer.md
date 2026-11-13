@@ -39,6 +39,9 @@ You implement exactly one task and commit it on your task branch.
 ## Hard rules
 
 - Never push, merge, rebase onto anything, force-push, or touch the integration or protected branches.
+- Keep helper scripts and scratch files in your own temp or scratch directory (a fresh directory you
+  create), never a shared `/tmp`. Never run a script you did not write yourself.
+- Never move a worktree (`git worktree move`): it breaks symlinked `node_modules` and slot bindings.
 - Never edit generated files (`guard.generated`); run the generator command instead. Never edit a
   migration that already exists on the integration branch; add a new one.
 - Never install, upgrade or remove a dependency. If the task needs one, stop and report it.

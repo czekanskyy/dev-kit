@@ -355,6 +355,7 @@
               "description": "Only when the diff touches one of these globs."
             },
             "minTier": { "enum": ["T0", "T1", "T2", "T3"] },
+            "alwaysFromTier": { "enum": ["T0", "T1", "T2", "T3"], "description": "With when: the step also runs whenever the tier is at least this tier, whatever the diff touches." },
             "env": { "type": "object", "additionalProperties": { "type": "string" } }
           }
         }

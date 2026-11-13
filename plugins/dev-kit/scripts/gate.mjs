@@ -43,7 +43,7 @@ export function resolveSteps({ config, repoRoot, changedFiles, tier = 'T3', only
     let skip = null;
     if (!run) skip = 'no command configured';
     else if (obj.minTier && tierIdx < TIERS.indexOf(obj.minTier)) skip = `needs ${obj.minTier}`;
-    else if (obj.when?.length && files) {
+    else if (obj.when?.length && files && !(obj.alwaysFromTier && tierIdx >= TIERS.indexOf(obj.alwaysFromTier))) {
       const scoped = scope ? files.filter((f) => f.startsWith(`${scope}/`)).map((f) => f.slice(scope.length + 1)) : files;
       if (!scoped.some((f) => anyGlob(obj.when, f, { root: scope ? path.join(root, scope) : root }))) skip = 'diff does not touch its paths';
     }
@@ -56,7 +56,8 @@ export function resolveSteps({ config, repoRoot, changedFiles, tier = 'T3', only
     const scope = normalizePath(sp.path).replace(/^\.\//, '').replace(/\/$/, '');
     const touched = !files || files.some((f) => f === scope || f.startsWith(`${scope}/`));
     for (const s of sp.gate ?? []) {
-      if (!touched) {
+      const always = typeof s === 'object' && s.alwaysFromTier && tierIdx >= TIERS.indexOf(s.alwaysFromTier);
+      if (!touched && !always) {
         const obj = typeof s === 'string' ? { run: s } : s;
         steps.push({ name: `${scope}: ${obj.name ?? obj.run}`, run: commandFor(obj.run, config), cwd: path.join(root, scope), env: obj.env ?? {}, skip: `diff does not touch ${scope}/` });
       } else {
@@ -325,6 +326,9 @@ async function runLocked({ args, config, root, base, steps, exec, gh, log }) {
     }
     if (dirty.length) {
       log(`gate: refusing --post-status: the working tree has uncommitted changes (${dirty.slice(0, 5).join(', ')}${dirty.length > 5 ? ', ...' : ''}). Commit them so the tested state equals the commit.`);
+      if (dirty.some((f) => f === '.claude/worktrees' || f.startsWith('.claude/worktrees/'))) {
+        log('gate: hint: agent worktrees live under .claude/worktrees: add /.claude/worktrees/ to .gitignore.');
+      }
       return 1;
     }
     if (!sha) {

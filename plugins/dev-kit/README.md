@@ -35,6 +35,11 @@ later. Known gaps:
 - The words `codex` and `copilot` are refused in commit and PR text even inside SDK or package names (on purpose).
 - Interpreters (`node -e`, `python -c`, `perl`) and scripts the agent writes and runs can do anything the guard refuses.
 - Variables and indirection (`X=main; git push origin $X`, `$(echo cat) .env`, aliases, functions, base64) hide commands.
+  The guard checks a command before it runs and cannot resolve shell variables, so `gh pr merge $n ...` is refused: use literal values.
+- A recursive `grep` or an `rg --hidden`/`-u` over a directory holding a secret file is refused even with `--exclude` or `-g '!...'`: the guard does not parse their option grammar. Use `git grep` or plain `rg`.
+- A worktree counts as a finished agent slot only under `worktree.root` (real paths), listed by git, with a `.agent-scope` file and a clean status including ignored files; other ignored files (local databases, uploads) make the guard ask. `rm -rf` of a slot is not unregistered from git, use `git worktree remove`.
+- The guard inspects command text and cannot see every reader. Not covered yet: `find ... | xargs grep` and `find -exec grep`, PowerShell `Get-ChildItem -Recurse | Select-String`, `grep -d recurse` / `--directories=recurse` and abbreviated long options, `rg --unrestricted`, positive `-g`/`--glob` rules, secrets in directories the scan skips or beyond its limits, and secret files that are neither hidden nor git-ignored (plain `rg` reads them). The primary control is the Claude Code permission deny rules for reading secret files, plus keeping secret files git-ignored and dot-named; the guard is a second line.
+- The stop check skips only files with unresolved merge conflicts; it does not detect other half-finished operations.
 - Text piped into a shell (`echo "..." | bash`) is not inspected; only a download piped into one is.
 - Git aliases (`git p` for push) are not expanded; hook or config edits through the Edit tool only ask.
 - `cd` inside a subshell or `bash -c` leaks into the following commands of the same line.

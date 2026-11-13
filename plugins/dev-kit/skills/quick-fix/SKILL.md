@@ -64,14 +64,15 @@ stop and notify (`notify.mjs --priority high --title "<project>: quick fix block
 
 ## 6. Merge
 
-`gh pr merge <number> --squash --delete-branch --match-head-commit <sha>` (`<sha>` from `gh pr view <number> --json headRefOid --jq .headRefOid`; never `--auto`)
+`gh pr merge <number> --squash --match-head-commit <sha>` (`<sha>` from `gh pr view <number> --json headRefOid --jq .headRefOid`, or a unique prefix of at least 7 characters; never `--auto`, never `--delete-branch`: gh would switch the local checkout to the base branch). Use literal values: the guard cannot resolve shell variables.
 
 The bash guard hook checks the green `local-gate` status on the PR head, an up-to-date base and the
 risk paths, and asks the user when needed. If it refuses because the base moved: rebase onto
 `<remote>/<integration>`, push with `--force-with-lease`, rerun the gate, merge again. Never try to
 work around a refusal.
 
-After merging: `git switch <integration> && git pull --ff-only`, then run `worktree.sync` if set.
+After merging: `git push <remote> --delete <branch>` to drop the remote task branch, then
+`git switch <integration> && git pull --ff-only`, then run `worktree.sync` if set.
 Notify quietly: `node "${CLAUDE_PLUGIN_ROOT}/scripts/notify.mjs" --priority low --title "<project>: merged" --message "<PR title>" --click <PR url>`.
 
 ## 7. Report

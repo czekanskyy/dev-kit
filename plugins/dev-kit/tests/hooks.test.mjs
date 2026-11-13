@@ -67,6 +67,42 @@ describe('stop-check', () => {
     assert.match(v.reason, /^Checks failed: node -e/);
     assert.match(v.reason, /TS2322/);
   });
+  describe('unmerged files', () => {
+    const both = (unmerged) => mockExec({ 'git diff --name-only --diff-filter=U': unmerged, 'git status': ' M src/a.ts\0UU src/conflict.ts\0' });
+    test('unmerged files are left out of the checked list, the others still run', () => {
+      fs.writeFileSync(path.join(root, 'src', 'conflict.ts'), '');
+      const ran = [];
+      checkStop(input, { config, exec: both('src/conflict.ts\0'), run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      assert.deepEqual(ran, ['node -e "process.exit(0)"', 'eslint "src/a.ts"']);
+    });
+    test('only unmerged changes means nothing to check', () => {
+      const exec = mockExec({ 'git diff --name-only --diff-filter=U': 'src/conflict.ts\0', 'git status': 'UU src/conflict.ts\0' });
+      assert.equal(checkStop(input, { config, exec, run: () => assert.fail('should not run') }), null);
+    });
+    test('non-ASCII unmerged paths match the NUL-delimited status paths', () => {
+      const exec = mockExec({ 'git diff --name-only --diff-filter=U -z': 'src/zażółć.ts\0src/other.ts\0', 'git status': ' M src/a.ts\0UU src/zażółć.ts\0' });
+      const ran = [];
+      checkStop(input, { config, exec, run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      assert.deepEqual(ran, ['node -e "process.exit(0)"', 'eslint "src/a.ts"']);
+      assert.ok(exec.calls.some((c) => c.endsWith('--diff-filter=U -z')));
+    });
+    test('a fake MERGE_HEAD changes nothing: checks still run and can block', () => {
+      fs.writeFileSync(path.join(root, '.git', 'MERGE_HEAD'), 'abc\n');
+      try {
+        const exec = mockExec({ 'git diff --name-only --diff-filter=U': '', 'git status': ' M src/a.ts\0' });
+        const v = checkStop(input, { config, exec, run: () => ({ ok: false, output: 'boom' }) });
+        assert.equal(v.decision, 'block');
+      } finally {
+        fs.rmSync(path.join(root, '.git', 'MERGE_HEAD'));
+      }
+    });
+    test('a failing unmerged lookup checks every changed file', () => {
+      const ran = [];
+      const exec = mockExec({ 'git status': ' M src/a.ts\0' });
+      checkStop(input, { config, exec, run: (c) => (ran.push(c), { ok: true, output: '' }) });
+      assert.equal(ran.length, 2);
+    });
+  });
   test('without stopCheck config does nothing', () => assert.equal(checkStop(input, { config: configFor(root), exec: status(' M src/a.ts\0') }), null));
   test('hook process prints block JSON', () => {
     const repo = fakeRepo();
