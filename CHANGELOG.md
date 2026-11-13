@@ -27,6 +27,12 @@ Fewer interruptions where the agent can fix the problem itself, plus fixes from 
 - Agents `implementer` and `quick-fixer`: scratch files in their own temp directory, never run
   foreign scripts, never move a worktree.
 
+Known gaps, planned for 0.1.2: the guard inspects command text and cannot see every reader. Not covered
+yet: `find ... | xargs grep` and `find -exec grep`, PowerShell `Get-ChildItem -Recurse | Select-String`,
+`grep -d recurse` and abbreviated long options, `rg --unrestricted`, positive `-g`/`--glob` rules,
+secrets in directories the scan skips or beyond its limits, and secret files that are neither hidden
+nor git-ignored. The primary control is the Claude Code permission deny rules for reading secret files.
+
 ## 0.1.0
 
 First release.

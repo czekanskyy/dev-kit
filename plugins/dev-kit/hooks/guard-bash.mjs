@@ -893,7 +893,9 @@ function evalSecrets(cmd, ctx, state, out) {
     let reads = false;
     if (b === 'rg') {
       // A single -u already equals --no-ignore, and -. is --hidden: any such flag in any single-dash cluster counts.
-      const clusterReads = args.some((a) => /^-[a-zA-Z.]+$/.test(a) && /[u.]/.test(a));
+      // Look only at the leading letters of each single-dash token (before a digit, quote, ! or other value text),
+      // so -uuM100 and -uug!x trip while -M100 does not.
+      const clusterReads = args.some((a) => /^-(?!-)/.test(a) && /[u.]/.test(/^-([a-zA-Z.]*)/.exec(a)[1]));
       reads = clusterReads || args.some((a) => a === '--hidden' || a.startsWith('--no-ignore'));
     } else {
       reads = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) && !a.startsWith('--')) || args.includes('--recursive') || args.includes('--dereference-recursive');

@@ -430,6 +430,10 @@ describe('recursive search over a directory holding secrets', () => {
     'rg -nuu KEY .',
     'rg --no-ignore-vcs KEY .',
     'rg -u KEY .',
+    'rg -uuM100 KEY .',
+    "rg -uug'!README.md' KEY .",
+    'rg -uug!README.md KEY .',
+    'rg -nuM5 KEY .',
     'rg -u KEY',
     'rg -nu KEY .',
     'rg -. KEY .',
@@ -437,7 +441,7 @@ describe('recursive search over a directory holding secrets', () => {
   ]) {
     test(`denied: ${c}`, () => assert.equal(run(c), 'deny'));
   }
-  for (const c of ['git grep KEY', 'git grep -n KEY -- src', 'rg KEY .', 'rg -n KEY', 'grep KEY src/a.ts', 'grep -rn KEY src']) {
+  for (const c of ['git grep KEY', 'git grep -n KEY -- src', 'rg KEY .', 'rg -n KEY', 'rg -M100 KEY .', 'rg -nM100 KEY .', 'grep KEY src/a.ts', 'grep -rn KEY src']) {
     test(`allowed: ${c}`, () => assert.equal(run(c), 'allow'));
   }
   test('plain rg allowed', () => assert.equal(run('rg KEY .'), 'allow'));
