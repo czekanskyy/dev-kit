@@ -892,8 +892,9 @@ function evalSecrets(cmd, ctx, state, out) {
     const args = cmd.argv.slice(1);
     let reads = false;
     if (b === 'rg') {
-      const uCount = args.filter((a) => /^-[a-zA-Z]*u/.test(a) && !a.startsWith('--')).reduce((n, a) => n + (a.match(/u/g) ?? []).length, 0);
-      reads = args.some((a) => a === '--hidden' || a === '-.' || a.startsWith('--no-ignore')) || uCount >= 2;
+      // A single -u already equals --no-ignore, and -. is --hidden: any such flag in any single-dash cluster counts.
+      const clusterReads = args.some((a) => /^-[a-zA-Z.]+$/.test(a) && /[u.]/.test(a));
+      reads = clusterReads || args.some((a) => a === '--hidden' || a.startsWith('--no-ignore'));
     } else {
       reads = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) && !a.startsWith('--')) || args.includes('--recursive') || args.includes('--dereference-recursive');
     }

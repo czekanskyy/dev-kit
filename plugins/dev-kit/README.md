@@ -36,7 +36,7 @@ later. Known gaps:
 - Interpreters (`node -e`, `python -c`, `perl`) and scripts the agent writes and runs can do anything the guard refuses.
 - Variables and indirection (`X=main; git push origin $X`, `$(echo cat) .env`, aliases, functions, base64) hide commands.
   The guard checks a command before it runs and cannot resolve shell variables, so `gh pr merge $n ...` is refused: use literal values.
-- A recursive `grep` or an `rg --hidden`/`-uu` over a directory holding a secret file is refused even with `--exclude` or `-g '!...'`: the guard does not parse their option grammar. Use `git grep` or plain `rg`.
+- A recursive `grep` or an `rg --hidden`/`-u` over a directory holding a secret file is refused even with `--exclude` or `-g '!...'`: the guard does not parse their option grammar. Use `git grep` or plain `rg`.
 - A worktree counts as a finished agent slot only under `worktree.root` (real paths), listed by git, with a `.agent-scope` file and a clean status including ignored files; other ignored files (local databases, uploads) make the guard ask. `rm -rf` of a slot is not unregistered from git, use `git worktree remove`.
 - The stop check skips only files with unresolved merge conflicts; it does not detect other half-finished operations.
 - Text piped into a shell (`echo "..." | bash`) is not inspected; only a download piped into one is.

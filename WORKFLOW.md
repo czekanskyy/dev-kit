@@ -123,7 +123,7 @@ Hooks run on every tool call in the project. Summary:
 - editing `guard.generated` files; editing `guard.immutableOnceMerged` files once they exist on the
   integration or a protected branch;
 - reading `guard.secrets` (with `guard.allowRead` exceptions such as `.env.example`), including a
-  recursive `grep -r` or an `rg --hidden`/`-uu`/`--no-ignore` over a directory that holds one. The
+  recursive `grep -r` or an `rg --hidden`/`-u`/`-.`/`--no-ignore` (a single `-u` is `--no-ignore`) over a directory that holds one. The
   refusal says to use `git grep <pattern>` (tracked files only) or plain `rg <pattern>` (skips
   ignored files such as `.env`), or to narrow the path. Exclusion flags (`--exclude`, `-g '!x'`) are
   never trusted, because the guard cannot parse grep and rg option grammar reliably. Naming the secret as a path is refused too;

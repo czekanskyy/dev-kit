@@ -5,7 +5,7 @@
 Fewer interruptions where the agent can fix the problem itself, plus fixes from real use.
 
 - Guard: a recursive `grep` (`-r`, `-R`, `--recursive`, `--dereference-recursive`) or an `rg` that reads
-  hidden or ignored files (`--hidden`, `-u` twice or more including combined flags such as `-uug`,
+  hidden or ignored files (`--hidden`, any `-u` or `-.` including combined flags such as `-uug`,
   `--no-ignore*`) over a directory holding a secret file is denied with an instruction: use
   `git grep <pattern>` or plain `rg <pattern>`, or narrow the path. Exclusion flags are not trusted.
 - Guard: dumping the environment (`printenv`, `env`, `export -p`, `set`, `Get-ChildItem env:`) or

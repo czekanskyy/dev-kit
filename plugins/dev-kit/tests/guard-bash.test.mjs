@@ -372,6 +372,17 @@ cases('secret reads denied', 'deny', [
   'cat ~/.config/gh/hosts.yml',
 ]);
 cases('non-secret reads allowed', 'allow', ['cat .env.example', 'cat README.md', 'grep -r TODO src', 'head package.json', 'rg --hidden TODO src', 'rg TODO .']);
+describe('rg -u over an ignored non-hidden secret', () => {
+  const repo = fakeRepo('devkit-pem-');
+  fs.writeFileSync(path.join(repo, 'key.pem'), 'x');
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'ignored-pattern');
+  const cfg = configFor(repo);
+  const run = (c) => check(c, { cwd: repo, config: cfg });
+  test('rg -u KEY . denied', () => assert.equal(run('rg -u KEY .'), 'deny'));
+  test('rg --no-ignore KEY . denied', () => assert.equal(run('rg --no-ignore KEY .'), 'deny'));
+  test('plain rg KEY . allowed', () => assert.equal(run('rg KEY .'), 'allow'));
+});
+
 describe('recursive search over a directory holding secrets', () => {
   const repo = fakeRepo('devkit-search-');
   fs.writeFileSync(path.join(repo, '.env'), 'X=1\n');
@@ -418,10 +429,15 @@ describe('recursive search over a directory holding secrets', () => {
     'rg -u -u KEY .',
     'rg -nuu KEY .',
     'rg --no-ignore-vcs KEY .',
+    'rg -u KEY .',
+    'rg -u KEY',
+    'rg -nu KEY .',
+    'rg -. KEY .',
+    'rg -n. KEY .',
   ]) {
     test(`denied: ${c}`, () => assert.equal(run(c), 'deny'));
   }
-  for (const c of ['git grep KEY', 'git grep -n KEY -- src', 'rg KEY .', 'rg -n KEY', 'rg -u KEY .', 'grep KEY src/a.ts', 'grep -rn KEY src']) {
+  for (const c of ['git grep KEY', 'git grep -n KEY -- src', 'rg KEY .', 'rg -n KEY', 'grep KEY src/a.ts', 'grep -rn KEY src']) {
     test(`allowed: ${c}`, () => assert.equal(run(c), 'allow'));
   }
   test('plain rg allowed', () => assert.equal(run('rg KEY .'), 'allow'));
