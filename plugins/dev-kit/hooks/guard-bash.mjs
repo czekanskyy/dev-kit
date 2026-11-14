@@ -126,9 +126,24 @@ function shortRef(ref) {
     .replace(/^heads\//, '');
 }
 
+/** Real path of a repository's shared git dir (the same for the main checkout and all its worktrees), or null. */
+function commonGitDir(dir, ctx) {
+  try {
+    const out = String(ctx.call('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir })).trim();
+    if (!out) return null;
+    return normalizePath(fs.realpathSync(out)).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** True when dir is in this repository: its root, or any other worktree sharing the same git dir. */
 function sameRepo(dir, ctx) {
   const r = findRepoRoot(dir);
-  return r !== null && normalizePath(r).toLowerCase() === ctx.repoRoot.toLowerCase();
+  if (r === null) return false;
+  if (normalizePath(r).toLowerCase() === ctx.repoRoot.toLowerCase()) return true;
+  const mine = commonGitDir(ctx.repoRoot, ctx);
+  return mine !== null && mine === commonGitDir(r, ctx);
 }
 
 // ---------------------------------------------------------------------------
