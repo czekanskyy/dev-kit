@@ -8,3 +8,5 @@ Thumbs.db
 !.env.example
 .claude/settings.local.json
 tmp/
+plugins/dev-kit/evals/results/
+eval-report.html
