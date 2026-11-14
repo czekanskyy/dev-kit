@@ -22,7 +22,7 @@ Install:
 On Claude Code 2.1.275 or later this also works in one step:
 `/plugin install dev-kit --marketplace czekanskyy/dev-kit`.
 
-Project setup and the full manual: see the repository's `README.md` and `WORKFLOW.md`.
+Project setup and the full manual: see the repository `README.md` and the manual `WORKFLOW.md` in this folder.
 
 ## Known limitations
 

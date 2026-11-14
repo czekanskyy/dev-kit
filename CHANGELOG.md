@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased (0.2.0)
+
+Four new skills and one new script.
+
+- `/dev-kit:plan-feature`: triages a T2 or T3 request, runs the planner, asks every `Needs decision`
+  row in one round and stops for acceptance. Writes only the spec.
+- `/dev-kit:fix-bug`: reproduce, root cause, failing regression test first, minimal fix, then the
+  `build-task` steps. Two failed attempts escalate to `models.implementerEscalation`.
+- `/dev-kit:update-deps`: inventory by `scripts/deps.mjs`, one `dep-researcher` per family in
+  parallel, one dated report. Installs nothing. New optional config key `deps.families`.
+- `/dev-kit:workflow-help`: read-only state summary and one proposed next skill.
+- `WORKFLOW.md` moved into `plugins/dev-kit/` so skills can read it.
+
 ## 0.1.1
 
 Fewer interruptions where the agent can fix the problem itself, plus fixes from real use.

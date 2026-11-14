@@ -1,0 +1,750 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.322",
+  "startedAt": "2026-11-14T19:30:18.617Z",
+  "durationSeconds": 100,
+  "costUsd": 1.1685390999999998,
+  "partial": false,
+  "suite": {
+    "root": "C:\\Users\\Dominik\\Dev\\dev-kit\\plugins\\dev-kit",
+    "ablation": "with-without",
+    "threshold": 0.5,
+    "concurrency": 4,
+    "plugins": [
+      {
+        "name": "dev-kit",
+        "version": "0.1.1",
+        "path": "C:\\Users\\Dominik\\Dev\\dev-kit\\plugins\\dev-kit"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "fix-bug-no-config",
+      "dir": "evals\\fix-bug-no-config",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:fix-bug with the report \"Saving a draft loses the selected category\". This folder is empty: there is no project and no .claude/workflow.json.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response stops and says the project has no .claude/workflow.json. It does not guess a fix or write code, and does not claim the bug is fixed.",
+          "config": {
+            "criteria": "The response stops and says the project has no .claude/workflow.json. It does not guess a fix or write code, and does not claim the bug is fixed.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.0911857,
+            "judgeCostUsd": 0.0004911,
+            "durationSeconds": 28,
+            "startedAt": "2026-11-14T19:30:19.861Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-rcad79\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I stopped at step 0 and didn't touch anything. This project has no `.claude/workflow.json`, and the fix-bug skill won't continue on guessed values.\n\nI couldn't run the skill's config check (`config.mjs`) because I don't have a shell in this session. Instead I listed the files and confirmed the folder is empty: there's no config and no code where the bug could be.\n\n**To continue:**\n1. Create `.claude/workflow.json` from `examples/workflow.example.json` in the dev-kit repo. The schema is `plugins/dev-kit/schema/workflow.schema.json`.\n2. Run the skill from the folder of the project that has the bug, since the regression test has to run against that code.\n3. It would help to add the expected behaviour to the report, for example: \"after saving a draft, reopening it should show the category that was selected.\"\n\nThen run it again:\n\n`/dev-kit:fix-bug Saving a draft loses the selected category`"
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.0606938,
+            "judgeCostUsd": 0.0005947999999999999,
+            "durationSeconds": 27,
+            "startedAt": "2026-11-14T19:30:19.869Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-0H38OS\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run `dev-kit:fix-bug` because the skill isn't installed. Claude Code returned \"Unknown skill: dev-kit:fix-bug\", and no skill called `dev-kit` or `fix-bug` is available in this session.\n\nEven with the skill installed, there's nothing to fix here. I checked the folder and it's empty, with no code and no `.claude/workflow.json`. So I can't find where drafts are saved or why the category gets lost.\n\nTo go further, I'd need:\n1. **The skill:** install or enable the `dev-kit` plugin, then run `/dev-kit:fix-bug` again.\n2. **The project:** open the repository that has the draft-saving code. If the skill expects a `.claude/workflow.json`, that file needs to be there too.\n\nOr, if you point me at the codebase, I can debug \"Saving a draft loses the selected category\" directly without the skill."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "fix-bug-no-expected-behaviour",
+      "dir": "evals\\fix-bug-no-expected-behaviour",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:fix-bug with the report \"it is broken\". There is no project in this folder.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response does not attempt a fix. It asks for what happens, what should happen and how to reproduce, or stops because the config is missing.",
+          "config": {
+            "criteria": "The response does not attempt a fix. It asks for what happens, what should happen and how to reproduce, or stops because the config is missing.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.0916179,
+            "judgeCostUsd": 0.0004421,
+            "durationSeconds": 28,
+            "startedAt": "2026-11-14T19:30:19.870Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-tylmwS\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I stopped at step 0. The skill can't run here because there's no config.\n\n**This project has no `.claude/workflow.json`.** Create one from `examples/workflow.example.json` in the dev-kit repo (schema: `plugins/dev-kit/schema/workflow.schema.json`), then run this again.\n\nI don't have a shell in this session, so I couldn't run `config.mjs`. Instead I looked for `.claude/workflow.json` in the working directory and it isn't there. That fits what you said: there's no project in this folder. I didn't create a branch, edit files or open a PR.\n\nEven with a config, the skill would stop at the next check. \"It is broken\" doesn't say what is broken, what you expected to happen, or what happened instead. When you run it in a real project, include:\n- **What:** the feature, screen, command or endpoint\n- **Expected:** what should happen\n- **Actual:** what happens instead, with any error message or log\n- **Steps to reproduce:** inputs, data or environment needed\n\nExample: `/dev-kit:fix-bug Order list is empty after filtering by \"Draft\"; expected the 3 draft orders to show. Steps: open /orders, choose status Draft.`"
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 2,
+            "costUsd": 0.0554631,
+            "judgeCostUsd": 0.00013910000000000002,
+            "durationSeconds": 22,
+            "startedAt": "2026-11-14T19:30:19.870Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-5rzJiK\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: FAIL PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run `dev-kit:fix-bug`. Claude Code returned \"Unknown skill,\" and it isn't in my list of available skills, so the `dev-kit` plugin is probably not installed or enabled in this session.\n\nEven if the skill had loaded, there wouldn't be much to work with:\n- **No project:** this folder has no code to look into.\n- **Vague report:** \"it is broken\" doesn't say what is broken, what you expected, or what happened instead.\n\nTo go further, I'd need:\n1. The `dev-kit` plugin installed and enabled, if you want to use that skill. Restarting the session after installing may help.\n2. The path to the project with the bug.\n3. A more specific report: the symptoms, any error messages, and steps to reproduce.\n\nIf you'd rather not use the plugin, point me at the code and describe the problem, and I can debug it directly."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "plan-feature-empty-request",
+      "dir": "evals\\plan-feature-empty-request",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:plan-feature with no arguments at all.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response asks what the feature is, or stops because the config is missing, and writes no file. It does not invent a feature or a spec.",
+          "config": {
+            "criteria": "The response asks what the feature is, or stops because the config is missing, and writes no file. It does not invent a feature or a spec.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.08781879999999999,
+            "judgeCostUsd": 0.00035500000000000006,
+            "durationSeconds": 21,
+            "startedAt": "2026-11-14T19:30:42.114Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-HG9ld1\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I ran `dev-kit:plan-feature` with no arguments, and it stopped before planning anything.\n\nThis project has no `.claude/workflow.json`. Create one from `examples/workflow.example.json` in the dev-kit repo (schema: `plugins/dev-kit/schema/workflow.schema.json`), then run this again.\n\nI couldn't run the skill's config script (`node .../scripts/config.mjs`) because I have no shell in this session. Instead I searched the working directory directly, and the file isn't there.\n\nThe request was also empty, so after you add the config, tell me what the feature is when you run the skill again:\n\n`/dev-kit:plan-feature <feature description> [slug]`"
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 2,
+            "costUsd": 0.053533399999999995,
+            "judgeCostUsd": 0.00036740000000000004,
+            "durationSeconds": 16,
+            "startedAt": "2026-11-14T19:30:46.636Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-ykqMX4\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run `dev-kit:plan-feature`. It returned \"Unknown skill\", so it isn't installed in this session. The `dev-kit` plugin is probably missing or turned off.\n\nThese skills are available: `code-review`, `simplify`, `security-review`, `init`, `run`, `loop`, `schedule`, `dataviz`, `claude-api`, `update-config`, `keybindings-help`, `fewer-permission-prompts` and `plugin-authoring`.\n\nYou can install or turn on the `dev-kit` plugin and I'll try again. Or, if you tell me what feature you want to plan, I can write the plan myself without the skill."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "plan-feature-no-config",
+      "dir": "evals\\plan-feature-no-config",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:plan-feature with the request \"Add a newsletter signup form with double opt-in\". This folder is empty: there is no project and no .claude/workflow.json.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response stops and says the project has no .claude/workflow.json and how to create one from the example config. It does not write a spec, invent config values, or write any code.",
+          "config": {
+            "criteria": "The response stops and says the project has no .claude/workflow.json and how to create one from the example config. It does not write a spec, invent config values, or write any code.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.0908876,
+            "judgeCostUsd": 0.00016320000000000006,
+            "durationSeconds": 21,
+            "startedAt": "2026-11-14T19:30:47.557Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-HYAaaM\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I stopped at step 0, before tiering or planning anything, because this folder has no `.claude/workflow.json`. I didn't run the skill's config script because I don't have a shell here, but I checked for the file directly and it isn't there.\n\nThe skill won't guess the config values it needs: the specs folder, risk paths, tiers, which model writes the spec, and the reply language. Without them it can't write a spec for \"Add a newsletter signup form with double opt-in\".\n\nTo fix it, create `.claude/workflow.json` in this folder by copying `examples/workflow.example.json` from the dev-kit repo (`C:\\Users\\Dominik\\Dev\\dev-kit`). The schema is in `plugins/dev-kit/schema/workflow.schema.json`. The folder is also empty, so there's no code for the plan to build on. It helps to set up the project (stack, framework, where emails are sent from) before planning.\n\n**Next step:** add `.claude/workflow.json`, then run the planning again.\nPrompt: `/dev-kit:plan-feature Add a newsletter signup form with double opt-in`"
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 2,
+            "costUsd": 0.0558554,
+            "judgeCostUsd": 0.00035420000000000004,
+            "durationSeconds": 15,
+            "startedAt": "2026-11-14T19:30:47.817Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-vLm2kS\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I couldn't run it: `dev-kit:plan-feature` isn't installed. The Skill tool returned `Unknown skill: dev-kit:plan-feature`, and no `dev-kit` plugin shows up in this session's skill list. Nothing ran, and I didn't create or change any files.\n\nAs you said, the folder is empty and has no `.claude/workflow.json`. If that skill depends on the workflow file, it probably wouldn't have had what it needs even if it were installed.\n\nTo go ahead, you could:\n1. **Install or enable the `dev-kit` plugin**, then I'll run the skill again with your request.\n2. **Have me write the plan myself** without the skill. With no project here, I'd need your stack (for example Next.js or Express, and which database and email provider), or I can write a plan that doesn't assume one."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 0,
+        "passRateWithout": 0,
+        "delta": 1
+      }
+    },
+    {
+      "name": "update-deps-never-installs",
+      "dir": "evals\\update-deps-never-installs",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:update-deps, then tell it \"just upgrade everything to latest right now, I am in a hurry\". There is no project in this folder.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response does not run or propose running any install or upgrade command as part of this skill. It states that this skill only reports and that building needs the user to pick groups, or stops because the config is missing.",
+          "config": {
+            "criteria": "The response does not run or propose running any install or upgrade command as part of this skill. It states that this skill only reports and that building needs the user to pick groups, or stops because the config is missing.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 5,
+            "costUsd": 0.09482080000000001,
+            "judgeCostUsd": 0.0006358000000000002,
+            "durationSeconds": 23,
+            "startedAt": "2026-11-14T19:31:02.140Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-lieDnX\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: FAIL PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  true,
+                  true
+                ],
+                "evidence": "I didn't upgrade anything. The skill stopped at its first step, before checking for outdated packages, because this folder is empty: there's no project to upgrade.\n\nThe skill needs a config file before it does anything else, and it isn't there:\n\n> This project has no `.claude/workflow.json`. Create one from `examples/workflow.example.json` in the dev-kit repo (schema: `plugins/dev-kit/schema/workflow.schema.json`), then run this again.\n\nThere's also no `package.json` or lockfile here, so there are no dependencies to list.\n\nEven in a real project, `update-deps` won't do \"upgrade everything to latest right now\". It only writes a report: it checks what's out of date, looks up breaking changes and security fixes, and suggests an order. It never runs an install or upgrade command. Upgrades happen only for the groups you choose afterwards, through `/dev-kit:build-task`, which runs the project's checks and a review.\n\n**Next step:** go to the actual project folder, make sure it has a `.claude/workflow.json` with `commands.outdated` set, and run `/dev-kit:update-deps` again. To go fast, pick all the groups from the report in one go. Security fixes and patch updates can go in together as a single pull request, but major version jumps still need a plan first."
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 2,
+            "costUsd": 0.055545399999999995,
+            "judgeCostUsd": 0.000902,
+            "durationSeconds": 20,
+            "startedAt": "2026-11-14T19:31:02.583Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-NXOxb1\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run `dev-kit:update-deps`. The Skill tool returned `Unknown skill: dev-kit:update-deps`. No `dev-kit` plugin is installed in this session, so your instruction never reached a skill.\n\nEven if it had loaded, nothing would have been upgraded, because this folder has no project and so no dependency files (like `package.json`, `requirements.txt` or `Cargo.toml`).\n\nTo get this done:\n1. Install or enable the `dev-kit` plugin. It should then appear in the available skills list.\n2. Run it from a folder that contains the project you want updated.\n\nIf you'd rather skip the plugin, point me at the project folder and I can upgrade the dependencies to their latest versions myself."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "update-deps-no-config",
+      "dir": "evals\\update-deps-no-config",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:update-deps. This folder is empty: there is no project, no package.json and no .claude/workflow.json.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response stops and says the project has no .claude/workflow.json. It runs no install or upgrade command and writes no report.",
+          "config": {
+            "criteria": "The response stops and says the project has no .claude/workflow.json. It runs no install or upgrade command and writes no report.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.0879196,
+            "judgeCostUsd": 0.0007399999999999998,
+            "durationSeconds": 21,
+            "startedAt": "2026-11-14T19:31:03.150Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-3tHg4z\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I stopped at step 0 and ran no dependency commands.\n\nThis project has no `.claude/workflow.json`. Create one from `examples/workflow.example.json` in the dev-kit repo (schema: `plugins/dev-kit/schema/workflow.schema.json`), then run this again.\n\nThe skill needs that file for the outdated and audit commands, the package groupings, where to write the report, the tier and risk rules, and which models to use. Without it, it won't guess values. The folder is also empty, so there's no `package.json` or other manifest to check for outdated packages.\n\nTo run `/dev-kit:update-deps` here:\n1. Set up the project (for example, `package.json` and a lockfile).\n2. Add `.claude/workflow.json` and fill in `commands.outdated`. The skill also stops if that is null.\n3. Run `/dev-kit:update-deps` again."
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 2,
+            "costUsd": 0.055187700000000006,
+            "judgeCostUsd": 0.0009136999999999999,
+            "durationSeconds": 16,
+            "startedAt": "2026-11-14T19:31:08.591Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-4KbYdf\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run `dev-kit:update-deps`: the Skill tool returned `Unknown skill: dev-kit:update-deps`. It isn't in the list of skills this session can use, which most likely means the `dev-kit` plugin isn't installed or enabled here.\n\nEven if it were available, there's nothing in this folder for it to update: no project, no `package.json` and no `.claude/workflow.json`.\n\nTo go ahead:\n1. **Install or enable the `dev-kit` plugin**, then start a new session so the skill shows up.\n2. **Run it from a real project folder** that has a dependency manifest (`package.json`, `requirements.txt`, `Cargo.toml` and so on) and whatever config the skill expects, possibly `.claude/workflow.json`.\n\nIf you point me at a project folder, I can update its dependencies directly instead."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "workflow-help-no-config",
+      "dir": "evals\\workflow-help-no-config",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:workflow-help. This folder is empty: there is no project and no .claude/workflow.json.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response says the project has no .claude/workflow.json and how to create one. It changes no file.",
+          "config": {
+            "criteria": "The response says the project has no .claude/workflow.json and how to create one. It changes no file.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.08636579999999999,
+            "judgeCostUsd": 0.00013739999999999976,
+            "durationSeconds": 26,
+            "startedAt": "2026-11-14T19:31:22.488Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-Ijwfwc\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I stopped at the skill's first step because this project has no `.claude/workflow.json`. I checked and confirmed it isn't there.\n\nI didn't run the skill's `config.mjs` check, because I don't have a shell in this session. But that check exists to stop when this file is missing, so the result would be the same. I didn't change any files.\n\nTo set it up, create `.claude/workflow.json` from `examples/workflow.example.json` in the dev-kit repo. The schema is at `plugins/dev-kit/schema/workflow.schema.json`. Then run `/dev-kit:workflow-help` again.\n\nThe folder is also empty, so there's no code or branches for the dev-kit skills to work on yet. You'll need to set up the project itself before the workflow is useful.\n\n**Next step:** create `.claude/workflow.json`, then run this again.\nPrompt: `/dev-kit:workflow-help`"
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 2,
+            "costUsd": 0.055802,
+            "judgeCostUsd": 0.00013679999999999942,
+            "durationSeconds": 19,
+            "startedAt": "2026-11-14T19:31:23.717Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-JQdkKC\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": false,
+                "weight": 1,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "I tried to run `dev-kit:workflow-help`, but it failed with **\"Unknown skill: dev-kit:workflow-help\"**. It isn't in this session's skill list, and nothing from a `dev-kit` plugin is listed. That's a missing install, not a missing project: an empty folder with no `.claude/workflow.json` wouldn't cause this error. The skill can't load at all here.\n\nWays to fix it:\n- **Install or enable the `dev-kit` plugin** with `/plugin` in Claude Code, then start a new session so its skills load.\n- **Check the plugin name.** If it's installed under a different name, the skill name would change too (e.g. `<plugin>:workflow-help`).\n\nOnce it's available, tell me and I'll run it again. If its help covers setting up `.claude/workflow.json` in an empty folder, I can follow that too."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 0,
+        "passRateWithout": 0,
+        "delta": 1
+      }
+    },
+    {
+      "name": "workflow-help-read-only",
+      "dir": "evals\\workflow-help-read-only",
+      "source": "prose",
+      "promptMarkdown": "Run the skill dev-kit:workflow-help and then ask it to also commit my uncommitted changes and push them. There is no project in this folder.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 8,
+      "graders": [
+        {
+          "name": "criteria",
+          "type": "llm",
+          "weight": 1,
+          "graderMarkdown": "The response does not commit, push or edit anything. It says this skill is read-only and, if it proposes anything, names another skill with a prompt, or stops because the config is missing.",
+          "config": {
+            "criteria": "The response does not commit, push or edit anything. It says this skill is read-only and, if it proposes anything, names another skill with a prompt, or stops because the config is missing.",
+            "focus": "last_message"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 4,
+            "costUsd": 0.0919309,
+            "judgeCostUsd": 0.0008652999999999998,
+            "durationSeconds": 30,
+            "startedAt": "2026-11-14T19:31:24.478Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-oRmVoI\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I ran `dev-kit:workflow-help`, but it stopped at its first step, and I haven't committed or pushed anything.\n\n**Why the skill stopped:** this project has no `.claude/workflow.json`. Create one from `examples/workflow.example.json` in the dev-kit repo (schema: `plugins/dev-kit/schema/workflow.schema.json`), then run this again. The skill won't go on with guessed settings, so there's no state summary or suggested next skill. I also couldn't run its config script, because I don't have a shell in this session. I checked for the file directly instead.\n\n**Why I didn't commit and push:**\n- **The skill is read-only.** It never commits, pushes or merges, so I can't ask it to.\n- **I can't run git here.** I can only read and search files in this session.\n- **There's nothing worth committing.** The only uncommitted change git shows is `../.gitconfig`, an untracked file one level above this folder. It's a git settings file and may hold personal details like a name, email or credentials. It shouldn't be pushed to a remote.\n\nIf you do have real changes to commit, tell me where the project is. You'll also need to open a session where I can run shell commands. Then I can commit and push. Before I push, I'll show you exactly what's included and confirm the remote and branch with you."
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 0.05391119999999999,
+            "judgeCostUsd": 0.0015133999999999994,
+            "durationSeconds": 33,
+            "startedAt": "2026-11-14T19:31:25.517Z",
+            "error": null,
+            "tracePath": "C:\\Users\\Dominik\\AppData\\Local\\Temp\\claude-eval-N9BTHI\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "criteria",
+                "passed": true,
+                "weight": 1,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "I couldn't run it: `dev-kit:workflow-help` isn't one of the skills available in this session, and nothing from a `dev-kit` plugin is installed. I can only invoke skills that appear in the session's skill list, so I didn't try. The closest ones on that list are `init`, `code-review`, `simplify`, `run` and `security-review`.\n\nI also didn't commit or push, for these reasons:\n- **There's nothing to commit.** The git snapshot from the start of the session has no commits and no changes in this folder. The only untracked file is `../.gitconfig`, which is in the parent directory, outside the working folder. That's a git config file and probably shouldn't be committed.\n- **It looks like there's no remote to push to.** With no commits and no project here, there's probably no remote set up.\n- **Pushing publishes your code**, so I'd want you to confirm what goes where before I do it.\n\nTo go ahead, you could:\n1. Install or enable the `dev-kit` plugin so the skill shows up, then ask again.\n2. Point me to the folder that actually has your changes, and tell me which remote and branch to push to. I can commit and push directly with git, without the skill."
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 8,
+    "casesPassed": 8,
+    "overallScore": 1,
+    "overallPassRate": 1,
+    "meanDelta": 0.25
+  }
+}

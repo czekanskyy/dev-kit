@@ -9,7 +9,7 @@ generated files, reading secrets, attributing commits to tools) no matter what a
 Everything project-specific lives in your repo, in `.claude/workflow.json`. The plugin hardcodes no
 branch names, commands, paths or languages.
 
-The full user manual is in [WORKFLOW.md](WORKFLOW.md).
+The full user manual is in [WORKFLOW.md](plugins/dev-kit/WORKFLOW.md).
 
 ## Install
 

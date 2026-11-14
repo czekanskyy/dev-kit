@@ -107,6 +107,18 @@
         "audit": { "type": ["string", "null"] }
       }
     },
+    "deps": {
+      "type": "object",
+      "description": "Settings for /dev-kit:update-deps.",
+      "additionalProperties": false,
+      "properties": {
+        "families": {
+          "type": "object",
+          "description": "Named groups of packages that must move together. Values are package names, a trailing * matches a prefix. Packages in no group are grouped by scope or name prefix.",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
     "subprojects": {
       "type": "array",
       "description": "Folders with their own checks. When a diff touches `path`, their gate steps run too.",
