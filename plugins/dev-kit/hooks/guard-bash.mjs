@@ -126,9 +126,24 @@ function shortRef(ref) {
     .replace(/^heads\//, '');
 }
 
+/** Real path of a repository's shared git dir (the same for the main checkout and all its worktrees), or null. */
+function commonGitDir(dir, ctx) {
+  try {
+    const out = String(ctx.call('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir })).trim();
+    if (!out) return null;
+    return normalizePath(fs.realpathSync(out)).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** True when dir is in this repository: its root, or any other worktree sharing the same git dir. */
 function sameRepo(dir, ctx) {
   const r = findRepoRoot(dir);
-  return r !== null && normalizePath(r).toLowerCase() === ctx.repoRoot.toLowerCase();
+  if (r === null) return false;
+  if (normalizePath(r).toLowerCase() === ctx.repoRoot.toLowerCase()) return true;
+  const mine = commonGitDir(ctx.repoRoot, ctx);
+  return mine !== null && mine === commonGitDir(r, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +169,25 @@ export function forbiddenText(text, config) {
   return null;
 }
 
-function readMessageFile(file, cwd, cmd) {
+/** Heredoc text written to `file` by an earlier command of the same input (`cat > f <<EOF ...`), or null. */
+function writtenEarlier(file, cwd, cmd, cmds) {
+  if (!Array.isArray(cmds)) return null;
+  const want = toAbsolute(file, cwd);
+  const parts = [];
+  for (const other of cmds) {
+    if (other === cmd) break;
+    if (!other.heredoc && !other.herestring) continue;
+    const hit = (other.redirects ?? []).some((r) => (r.op === '>' || r.op === '>>' || r.op === '>|') && r.target && !String(r.target).includes('$') && toAbsolute(r.target, cwd) === want);
+    if (hit) parts.push([other.heredoc, other.herestring].filter(Boolean).join('\n'));
+  }
+  return parts.length ? parts.join('\n') : null;
+}
+
+function readMessageFile(file, cwd, cmd, cmds) {
   if (file === undefined) return { text: '' };
   if (file === '-') return { text: [cmd.heredoc, cmd.herestring].filter(Boolean).join('\n') };
+  const early = writtenEarlier(file, cwd, cmd, cmds);
+  if (early !== null) return { text: early };
   try {
     return { text: fs.readFileSync(toAbsolute(file, cwd), 'utf8') };
   } catch {
@@ -279,7 +310,7 @@ function evalGit(cmd, ctx, state, out) {
         ask('git commit -C/-c/--reuse-message reuses an existing message that cannot be checked for tool attribution. Confirm, or pass the message with -m.');
       }
       const texts = [...(o.values.m ?? []), ...(o.values.message ?? [])];
-      for (const f of [...(o.values.F ?? []), ...(o.values.file ?? [])]) texts.push(readMessageFile(f, gitCwd, cmd));
+      for (const f of [...(o.values.F ?? []), ...(o.values.file ?? [])]) texts.push(readMessageFile(f, gitCwd, cmd, state.cmds));
       for (const t of o.values.trailer ?? []) texts.push(t);
       if (cmd.heredoc && !texts.length) texts.push(cmd.heredoc);
       checkMessage(texts, 'Commit message', config, out);
@@ -288,7 +319,7 @@ function evalGit(cmd, ctx, state, out) {
     case 'tag': {
       const o = parseOpts(args, { short: 'mFu', long: ['message', 'file', 'local-user', 'cleanup'] });
       const texts = [...(o.values.m ?? []), ...(o.values.message ?? [])];
-      for (const f of [...(o.values.F ?? []), ...(o.values.file ?? [])]) texts.push(readMessageFile(f, gitCwd, cmd));
+      for (const f of [...(o.values.F ?? []), ...(o.values.file ?? [])]) texts.push(readMessageFile(f, gitCwd, cmd, state.cmds));
       checkMessage(texts, 'Tag message', config, out);
       break;
     }
@@ -643,7 +674,7 @@ function evalGh(cmd, ctx, state, out) {
       long: ['title', 'body', 'body-file', 'base', 'head', 'assignee', 'label', 'milestone', 'project', 'reviewer', 'template', 'repo', 'add-label', 'remove-label', 'add-reviewer', 'remove-reviewer', 'add-assignee', 'remove-assignee', 'add-project', 'remove-project', 'recover'],
     });
     const texts = [...(o.values.t ?? []), ...(o.values.title ?? []), ...(o.values.b ?? []), ...(o.values.body ?? [])];
-    for (const f of [...(o.values.F ?? []), ...(o.values['body-file'] ?? [])]) texts.push(readMessageFile(f, state.cwd, cmd));
+    for (const f of [...(o.values.F ?? []), ...(o.values['body-file'] ?? [])]) texts.push(readMessageFile(f, state.cwd, cmd, state.cmds));
     checkMessage(texts, 'Pull request text', config, out);
     return;
   }
@@ -698,7 +729,7 @@ function evalPrMerge(args, ctx, state, cmd, out, globalRepo) {
     );
   }
   const texts = [...(o.values.t ?? []), ...(o.values.subject ?? []), ...(o.values.b ?? []), ...(o.values.body ?? [])];
-  for (const f of [...(o.values.F ?? []), ...(o.values['body-file'] ?? [])]) texts.push(readMessageFile(f, state.cwd, cmd));
+  for (const f of [...(o.values.F ?? []), ...(o.values['body-file'] ?? [])]) texts.push(readMessageFile(f, state.cwd, cmd, state.cmds));
   checkMessage(texts, 'Merge commit text', config, out);
   if (configBroken(ctx, 'gh pr merge', out)) return;
   if ([o.pos[0], o.values['match-head-commit']?.[0], o.values.R?.[0], o.values.repo?.[0], globalRepo].some((v) => typeof v === 'string' && /[$`]|%\w+%/.test(v))) {
@@ -1343,7 +1374,7 @@ export function evaluateBash(command, ctxOpts = {}) {
   const ctx = ctxOpts.config && ctxOpts.branchAt ? ctxOpts : makeContext(ctxOpts);
   const cmds = parseCommandLine(command, { dialect: ctxOpts.dialect });
   const out = [];
-  const state = { cwd: ctx.cwd, branch: undefined };
+  const state = { cwd: ctx.cwd, branch: undefined, cmds };
   if (/\b(iex|invoke-expression)\b/i.test(command) && /\b(irm|iwr|invoke-restmethod|invoke-webrequest|downloadstring|downloadfile)\b/i.test(command)) {
     out.push({ decision: 'deny', reason: 'Invoke-Expression of downloaded content refused: it runs unreviewed code. Download the file, read it, and ask the user.' });
   }

@@ -185,10 +185,13 @@ Messages carry only a title and a link.
 | `/dev-kit:build-task` | `/dev-kit:build-task specs/newsletter-signup.md task 2` |
 | `/dev-kit:review-changes` | `/dev-kit:review-changes 142` |
 | `/dev-kit:audit-docs` | `/dev-kit:audit-docs docs/` |
+| `/dev-kit:plan-feature` | `/dev-kit:plan-feature Newsletter signup with double opt-in` |
+| `/dev-kit:fix-bug` | `/dev-kit:fix-bug Saving a draft loses the selected category` |
+| `/dev-kit:update-deps` | `/dev-kit:update-deps` |
+| `/dev-kit:workflow-help` | `/dev-kit:workflow-help` |
 
-Coming next: night mode (`/plan-night`, unattended queue, morning report), `/plan-feature`,
-`/fix-bug` (mandatory regression test), `/update-deps` (inventory, parallel `dep-researcher`, report,
-your pick), `/release-stage`, `/workflow-help`.
+Coming next: night mode (`/plan-night`, unattended queue, morning report). A release skill is
+project specific (it knows your stages and environments), so it lives in the project, not in the kit.
 
 ## Typical scenarios
 
@@ -209,10 +212,10 @@ your yes because risk paths are touched.
 spec. Every task follows its own path; the final review is adversarial; every merge waits for your
 yes.
 
-**Dependency update (coming next).** `/update-deps` will inventory outdated packages, research each
-family in parallel with `dep-researcher` (web content treated as untrusted data), and present a report
-with risk, tier and affected code. Your selection is the go-ahead; security fixes first, then patches
-in one T1 PR, families separately as T2, majors one by one with a spec.
+**Dependency update.** `/dev-kit:update-deps` inventories outdated packages, researches each family
+in parallel with `dep-researcher` (web content treated as untrusted data) and writes a report with
+risk, tier and affected code. It installs nothing. Your selection is the go-ahead; security fixes
+first, then patches in one T1 PR, families separately as T2, majors one by one with a spec.
 
 ## FAQ
 
