@@ -209,6 +209,15 @@ cases('attribution in messages denied', 'deny', [
   'gh pr create -t "x" -F commit-msg.txt',
   'git tag -a v1 -m "Release by Copilot"',
 ]);
+cases('message file written by the same command is checked from its heredoc', 'deny', [
+  'cat > new-body.md <<EOF\nMade with Codex\nEOF\ngh pr create --title "x" --body-file new-body.md',
+  'cat > new-msg.txt <<EOF\nCo-Authored-By: Bot <bot@example.test>\nEOF\ngit commit -F new-msg.txt',
+]);
+cases('message file written by the same command, clean text', 'allow', [
+  'cat > new-body.md <<EOF\nDodaj import danych\nEOF\ngh pr create --title "x" --body-file new-body.md',
+  'cat > /c/Users/x/body.md <<EOF\nDodaj import\nEOF\ngh pr create --title "x" --body-file /c/Users/x/body.md',
+]);
+cases('message file that does not exist and is not written earlier still asks', 'ask', ['gh pr create --title "x" --body-file missing-body.md']);
 cases('clean messages allowed', 'allow', [
   'git commit -m "Dodaj import danych z pliku CSV i popraw walidację"',
   'git commit -m "Fix: handle empty rows" -m "Keeps the old behaviour for headers."',
