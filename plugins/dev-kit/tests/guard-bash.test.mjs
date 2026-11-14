@@ -132,6 +132,20 @@ describe('branch state in other directories', () => {
   test('git -C into another repo still denies an explicit protected push', () => assert.equal(check(`git -C ${other.replace(/\\/g, '/')} push origin main`), 'deny'));
   test('read-only git in another repo is allowed', () => assert.equal(check(`git -C ${other.replace(/\\/g, '/')} status`), 'allow'));
   test('git -C into a subdir of the same repo is known', () => assert.equal(check('git -C src commit -m "x"'), 'allow'));
+  const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-common-'));
+  const sibling = other.split(path.sep).join('/');
+  const sameCommon = () => mockExec({ 'git rev-parse --path-format=absolute --git-common-dir': shared });
+  test('a sibling worktree of the same repo is known: commit on a task branch is allowed', () =>
+    assert.equal(check(`git -C ${sibling} commit -m "x"`, { exec: sameCommon() }), 'allow'));
+  test('a sibling worktree of the same repo is known: push of a task branch is allowed', () =>
+    assert.equal(check(`cd ${sibling} && git push origin feature/x`, { exec: sameCommon() }), 'allow'));
+  test('a sibling worktree on a protected branch still denies a commit', () =>
+    assert.equal(check(`git -C ${sibling} commit -m "x"`, { exec: sameCommon(), branch: 'main' }), 'deny'));
+  test('a repo with a different git dir still asks', () => {
+    let n = 0;
+    const exec = mockExec({ 'git rev-parse --path-format=absolute --git-common-dir': () => (n++ % 2 ? fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-c2-')) : shared) });
+    assert.equal(check(`git -C ${sibling} commit -m "x"`, { exec }), 'ask');
+  });
   test('switching to a protected branch is tracked', () => assert.equal(check('git switch main && git commit -m "x"'), 'deny'));
   test('switching away from a protected branch is tracked', () => assert.equal(check('git switch feature/y && git commit -m "x"', { branch: 'main' }), 'allow'));
   test('checkout of a file is not a branch switch', () => assert.equal(check('git checkout src && git commit -m "x"', { branch: 'main' }), 'deny'));
@@ -195,6 +209,15 @@ cases('attribution in messages denied', 'deny', [
   'gh pr create -t "x" -F commit-msg.txt',
   'git tag -a v1 -m "Release by Copilot"',
 ]);
+cases('message file written by the same command is checked from its heredoc', 'deny', [
+  'cat > new-body.md <<EOF\nMade with Codex\nEOF\ngh pr create --title "x" --body-file new-body.md',
+  'cat > new-msg.txt <<EOF\nCo-Authored-By: Bot <bot@example.test>\nEOF\ngit commit -F new-msg.txt',
+]);
+cases('message file written by the same command, clean text', 'allow', [
+  'cat > new-body.md <<EOF\nDodaj import danych\nEOF\ngh pr create --title "x" --body-file new-body.md',
+  'cat > /c/Users/x/body.md <<EOF\nDodaj import\nEOF\ngh pr create --title "x" --body-file /c/Users/x/body.md',
+]);
+cases('message file that does not exist and is not written earlier still asks', 'ask', ['gh pr create --title "x" --body-file missing-body.md']);
 cases('clean messages allowed', 'allow', [
   'git commit -m "Dodaj import danych z pliku CSV i popraw walidację"',
   'git commit -m "Fix: handle empty rows" -m "Keeps the old behaviour for headers."',
