@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+Spec template.
+
+- `templates/spec.md`: the structure of a T2 or T3 spec (Status line, Goal, Acceptance criteria with
+  what stays as today, Data model, Tasks with a Parallelism line, Decisions with a source per
+  `Decided` row, Risks with a `Caught by:` check). The `planner` agent follows it instead of an
+  inline outline, and `plan-feature` checks the result against it.
+
 ## 0.2.0
 
 Four new skills, one new script and two guard fixes that remove needless prompts.

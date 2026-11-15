@@ -44,7 +44,9 @@ step 2 and the explorer findings. The agent writes exactly one file, `<paths.spe
 not write or edit it yourself.
 
 Check the result before showing it:
-- it has Goal, Acceptance criteria (observable and testable), Data model, Tasks, Decisions and Risks;
+- it follows `${CLAUDE_PLUGIN_ROOT}/templates/spec.md`: Status line, Goal, Acceptance criteria
+  (observable and testable), Data model, Tasks with a Parallelism line, Decisions and Risks, and no
+  template comment or placeholder is left;
 - every task names its tier, files, tests and dependencies, and T3 work is split into T1 and T2 tasks;
 - every decision is marked Decided, Assumed or Needs decision, with a recommendation on each open one;
 - risk paths and migrations are listed, and a destructive migration is marked T3.

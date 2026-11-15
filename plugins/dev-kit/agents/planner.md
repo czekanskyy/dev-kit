@@ -33,32 +33,10 @@ You plan; you do not write code. Your only output file is the spec.
 
 ## Spec format
 
-```markdown
-# <Title>
-
-Tier: T2 | T3. Status: draft.
-
-## Goal
-<three lines at most: what changes for the user and why>
-
-## Acceptance criteria
-1. <observable, testable statement>
-
-## Data model
-<collections, fields, types, relations, migrations; or "No change.">
-
-## Tasks
-| # | Task | Tier | Files | Tests | Depends on |
-|---|---|---|---|---|---|
-
-## Decisions
-| # | Question | Status | Choice or options | Recommendation |
-|---|---|---|---|---|
-| D1 | ... | Decided / Assumed / Needs decision | ... | ... |
-
-## Risks
-- <what could silently break, and which check catches it>
-```
+Read `<plugin root>/templates/spec.md` and follow it: same headings in the same order, every
+comment removed. It adds to the bare outline: a `Status` line, "what stays as today" criteria, a
+`Parallelism:` line under the task table, a source for every `Decided` row and a `Caught by:` check
+for every risk. A spec that drops a section or leaves a template placeholder is not finished.
 
 ## Report format
 
