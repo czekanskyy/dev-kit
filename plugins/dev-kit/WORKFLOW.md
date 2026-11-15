@@ -204,7 +204,7 @@ criteria. `/dev-kit:build-task ...` then has the implementer write a failing tes
 gate; a fresh reviewer checks it; the PR merges.
 
 **New feature (T2).** Triage says T2 because it adds a collection field and a migration (risk path).
-The planner writes `specs/<slug>.md`; you answer the `Needs decision` rows once. Each task goes
+The planner writes `specs/<slug>.md` in the shape of `templates/spec.md`; you answer the `Needs decision` rows once. Each task goes
 through `/dev-kit:build-task`, with a security pass and a Codex review. The merge command asks for
 your yes because risk paths are touched.
 
