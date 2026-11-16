@@ -49,7 +49,7 @@ greps.
 
 | Tier | May be queued when |
 |---|---|
-| T0, T1 | it has a brief: goal, files, acceptance criteria, in the task's own words |
+| T0, T1 | it has a brief: goal, files, acceptance criteria, in the task's own words, or it is a task of an accepted spec (then it carries the spec reference, not a brief) |
 | T2, T3 | it has a spec in `paths.specs` with `Status: accepted` (or `in progress`) whose Decisions table has no `Needs decision` row; the queue entry names the task id in that spec |
 
 A T2 or T3 request without such a spec is not queued. Say which of the three is missing (no spec,
@@ -91,6 +91,13 @@ Never guess an answer. A question left unanswered means the task is not queued.
 
 ## 5. Write the queue
 
+Before writing, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" busy` and
+`node "${CLAUDE_PLUGIN_ROOT}/scripts/night-lock.mjs" status`. `busy` prints `{busy, reason}` and exits 1
+while a run is live, paused or crashed and not ended. Exit 1: refuse to overwrite the queue, write
+nothing, say why (the `reason` from its output) and what to do: wait for the run to end, or finish it
+with `/dev-kit:run-report`, then plan again. A `night-lock.mjs status` that is not valid JSON or reports
+an error is also a stop: show it. A plain `valid: false` (no armed run) is fine here.
+
 Order the tasks the way they should run, dependencies first. Write `paths.queue` (overwrite the
 previous queue only after telling the user it is replaced) in this format: a header line with the
 planning date and the weekly usage, then one block per task.
@@ -114,8 +121,9 @@ Planned: <YYYY-MM-DD>   Weekly usage: <pct>%
 - merge: no
 ```
 
-Ids are short and unique (`n1`, `n2`, ...). T0 and T1 carry `brief`, T2 and T3 carry `spec` and
-`specTier` (the tier in the spec header). `merge` is always written. Never write `base` or `hotfix`
+Ids are short and unique (`n1`, `n2`, ...). Any task taken from a spec, whatever its tier (a T1 task
+inside a T3 spec too), carries `spec` and `specTier` (the tier in the spec header). `brief` is only for
+a request that has no spec (T0, T1). `merge` is always written. Never write `base` or `hotfix`
 lines, a status, or a branch name: run state lives in `night-state.json`, which only the run writes.
 
 ## 6. Validate
@@ -138,7 +146,9 @@ warnings. Then offer one of:
 - Trigger: a trigger passes no arguments, only its stored prompt. The developer creates it in the
   desktop app; its prompt is `/dev-kit:night-run --until <time>` or `/dev-kit:night-run --for <hours>`
   (add `--resumable` when wanted). Give the exact prompt to copy. The default permission mode must
-  stay on, not bypass.
+  stay on, not bypass. For a `--resumable` run give a second, separate trigger prompt for the resume:
+  bare `/dev-kit:night-run`, repeated hourly (it only continues an armed run). Explain that the arming
+  prompt must fire only once; a repeating arming trigger would try to arm a second run.
 - Neither: the queue is saved and nothing runs.
 
 ## 8. Report and next step
