@@ -906,6 +906,22 @@ function writeCommand(ctx, cmd, positional, flags) {
   const state = cmd === 'set' ? takeover(readState(ctx, tasks), flags.session) : readState(ctx, tasks);
 
   if (cmd === 'next') {
+    // Another live session holds the run: answer read-only, never write heartbeat, deferrals or abandons.
+    if (flags.session && heartbeatBlocks(state, flags.session)) {
+      const result = nextTask({ tasks, state, config: ctx.config, session: flags.session });
+      if (result.task || result.deferred.length) {
+        const writer = previousSession(state);
+        Object.assign(result, {
+          task: null,
+          route: null,
+          deferred: [],
+          held: true,
+          reason: `${writer ? `session ${writer}` : 'an unknown session'} holds the run`,
+        });
+      }
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
     const abandoned = abandonStale(state);
     const base = abandoned.state;
     const result = nextTask({ tasks, state: base, config: ctx.config, session: flags.session });
