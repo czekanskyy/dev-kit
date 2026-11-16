@@ -135,6 +135,9 @@ function canonicalPath(p) {
   const win = process.platform === 'win32';
   if (win) {
     // Windows ignores trailing dots and spaces in each component and treats `name:stream` as the file.
+    // Long-path (`//?/`) and device (`//./`) prefixes name the same file as the plain form.
+    if (/^\/\/[?.]\/UNC\//i.test(x)) x = `//${x.slice(8)}`;
+    else if (/^\/\/[?.]\/[a-zA-Z]:(\/|$)/.test(x)) x = x.slice(4);
     const drive = /^[a-zA-Z]:/.test(x) ? x.slice(0, 2) : '';
     x = drive + x.slice(drive.length).replace(/:[^/]*(?=\/|$)/g, '').replace(/[. ]+(?=\/|$)/g, '');
   }
@@ -155,5 +158,14 @@ function canonicalPath(p) {
 
 /** Same path, ignoring slash style, trailing dots/spaces and streams (win32), symlinked parents, and case (win32, darwin). */
 export function samePath(a, b) {
-  return canonicalPath(a) === canonicalPath(b);
+  const ca = canonicalPath(a);
+  const cb = canonicalPath(b);
+  if (ca === cb) return true;
+  if (process.platform === 'win32') {
+    // Fail closed: a UNC or device path (admin share such as \\host\C$, \\.\) cannot be resolved
+    // reliably to a local path, so one whose basename matches the other side counts as the same file.
+    const unc = (s) => s.startsWith('//');
+    if (unc(ca) !== unc(cb) && path.posix.basename(ca) === path.posix.basename(cb)) return true;
+  }
+  return false;
 }
