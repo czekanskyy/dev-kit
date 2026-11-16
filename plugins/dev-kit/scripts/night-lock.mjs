@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './lib/config.mjs';
 import { isMain } from './lib/hook.mjs';
-import { EXPIRY_GRACE_MS, buildMarker, isWellFormed, markerPath, readMarker, writeMarker } from './lib/night.mjs';
+import { EXPIRY_GRACE_MS, buildMarker, isWellFormed, markerPath, readMarker, withMarkerLock, writeMarker } from './lib/night.mjs';
 
 const HOUR_MS = 3600 * 1000;
 const DEFAULT_MAX_RUN_HOURS = 12;
@@ -209,8 +209,22 @@ function start(c, expiryMs) {
 // ---------------------------------------------------------------------------
 // Subcommands
 
+/** Runs fn under the marker lock; a lock timeout is a refusal (exit 1). */
+function lockedMarker(c, fn) {
+  try {
+    return withMarkerLock(c.file, fn);
+  } catch (err) {
+    throw err instanceof LockError ? err : new LockError(err.message, 1);
+  }
+}
+
 export function acquire(args, ctx) {
   const c = resolveCtx(ctx);
+  // Check and write happen under one lock so concurrent acquires cannot both succeed.
+  return lockedMarker(c, () => acquireLocked(args, c));
+}
+
+function acquireLocked(args, c) {
   dropExpired(c);
   const hasUntil = args.until !== undefined;
   const hasFor = args.for !== undefined;
@@ -261,7 +275,7 @@ export function claim(args, ctx) {
 
 export function status(ctx) {
   const c = resolveCtx(ctx);
-  dropExpired(c);
+  lockedMarker(c, () => dropExpired(c));
   const m = readMarker(c.file, { now: c.now });
   if (!m) return { valid: false };
   const pid = currentLockPid(c, m);
@@ -293,6 +307,10 @@ export function keepawake(ctx) {
 
 export function release(ctx) {
   const c = resolveCtx(ctx);
+  return lockedMarker(c, () => releaseLocked(c));
+}
+
+function releaseLocked(c) {
   let raw = null;
   try {
     raw = JSON.parse(fs.readFileSync(c.file, 'utf8').replace(/^﻿/, ''));
