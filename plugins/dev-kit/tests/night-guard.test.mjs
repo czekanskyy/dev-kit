@@ -420,6 +420,19 @@ describe('queue and marker path matching (review findings)', () => {
     assert.equal(denied(root, config, 'queue/night.md.bak'), false);
     assert.equal(denied(root, config, 'queue/night.mdx'), false);
   });
+  test('long-path, device and UNC admin-share forms on win32', { skip: win ? false : 'win32 path rules only' }, () => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    const q = path.join(root, 'queue', 'night.md');
+    for (const p of [`\\\\?\\${q}`, `\\\\.\\${q}`, `//?/${q.replace(/\\/g, '/')}`, `\\\\?\\${q}::$DATA`]) {
+      assert.equal(denied(root, config, p), true, p);
+    }
+    assert.equal(denied(root, config, `\\\\?\\${file}`), true, 'marker long path');
+    const unc = `\\\\localhost\\${q[0]}$${q.slice(2)}`;
+    assert.equal(denied(root, config, unc), true, unc);
+    assert.equal(denied(root, config, `\\\\?\\UNC\\localhost\\${q[0]}$${q.slice(2)}`), true, 'long UNC');
+    assert.equal(denied(root, config, `\\\\?\\${path.join(root, 'queue', 'other.md')}`), false);
+  });
   test('case-insensitive on darwin, exact on linux', { skip: win ? 'covered by the win32 test' : false }, () => {
     const { root, file, config } = setup();
     writeMarker(file, validMarker(['s1']));
