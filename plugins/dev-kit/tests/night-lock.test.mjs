@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { fakeRepo } from './helpers.mjs';
-import { markerPath, readMarker } from '../scripts/lib/night.mjs';
+import { buildMarker, markerPath, readMarker, writeMarker } from '../scripts/lib/night.mjs';
 import { acquire, claim, keepawake, lockPlan, release, spawnDetached, status } from '../scripts/night-lock.mjs';
 
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'night-lock.mjs');
@@ -253,6 +253,22 @@ describe('real process', () => {
 
 describe('cli', () => {
   const run = (cwd, ...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf8' });
+
+  test('claim fails closed (exit 1, no run id printed) when the marker lock cannot be taken', () => {
+    const root = fakeRepo('devkit-lock-cli-');
+    const now = Date.now();
+    const file = markerPath(root);
+    writeMarker(file, buildMarker({ runId: 'r1', start: now - 1000, end: now + 3600000 }));
+    fs.writeFileSync(`${file}.lock`, `${process.pid}\n`); // held by a live owner (this test process)
+    const r = spawnSync(process.execPath, [SCRIPT, 'claim', '--run', 'r1'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, DEVKIT_NIGHT_LOCK_WAIT_MS: '300' },
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.equal(r.stdout.trim(), '');
+    assert.match(r.stderr, /locked/i);
+  });
 
   test('claim exits 1 with a message when there is no marker', () => {
     const root = fakeRepo('devkit-lock-cli-');

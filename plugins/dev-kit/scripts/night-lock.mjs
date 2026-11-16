@@ -266,7 +266,9 @@ function acquireLocked(args, c) {
 export function claim(args, ctx) {
   const c = resolveCtx(ctx);
   if (!args.run) throw new LockError('claim needs --run <id>', 2);
-  const m = requireMarker(c);
+  // Taking the marker lock proves it is free: a stuck lock means the guard could not register this
+  // session, so fail closed instead of starting a run without night protections.
+  const m = lockedMarker(c, () => requireMarker(c));
   if (args.run !== m.runId) throw new LockError('run id does not match the armed night marker', 1);
   if (c.now < Date.parse(m.start)) throw new LockError(`the run has not started yet (starts ${m.start})`, 1);
   if (c.now > Date.parse(m.end)) throw new LockError(`the run has ended (ended ${m.end})`, 1);

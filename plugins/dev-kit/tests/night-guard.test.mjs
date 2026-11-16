@@ -304,6 +304,17 @@ describe('queue and marker are not writable by a night session', () => {
 
 describe('claim registers the session', () => {
   const CLAIM = 'node /plugin/scripts/night-lock.mjs claim --run run-1';
+  test('a registration lock failure throws instead of being swallowed (fail closed)', () => {
+    const { root, file } = setup();
+    writeMarker(file, validMarker());
+    fs.writeFileSync(`${file}.lock`, `${process.pid}\n`);
+    process.env.DEVKIT_NIGHT_LOCK_WAIT_MS = '200';
+    try {
+      assert.throws(() => registerClaim(bashInput(root, CLAIM, 'sess-a'), { now: NOW }), /locked/i);
+    } finally {
+      delete process.env.DEVKIT_NIGHT_LOCK_WAIT_MS;
+    }
+  });
   test('registers on night-lock.mjs claim', () => {
     const { root, file } = setup();
     writeMarker(file, validMarker());
