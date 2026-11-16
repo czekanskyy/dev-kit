@@ -219,7 +219,7 @@ must not touch.
    push; 90 of the 5-hour window (`nightWindowPauseAt`) pauses; 95 weekly stops the run.
 5. **Merge policy.** `night.merge: none` (default): every PR stays open. `lowRisk`: a T0 or T1 task
    with no risk path, a green gate on the PR head and an APPROVE review is merged into the
-   integration branch. A T3 spec or a risk path is never merged at night, at any setting (rule D15):
+   integration branch. A T3 spec or a risk path is never merged at night, at any setting:
    its PR waits for you, with one quiet push.
 6. **Files.** The queue is `paths.queue`, written by you or `plan-night` only. Run state is
    `night-state.json` next to it, written through `queue.mjs`. The marker lives in
