@@ -49,8 +49,9 @@ say so as the other skills do), report the reason and stop.
    `worktree`, `riskPaths`, `paths`, `languages` and `commands` in mind.
 2. If the session visibly runs in a bypass permission mode, stop: the run needs the default mode so
    the guard can refuse. Say so.
-3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" heartbeat --session ${CLAUDE_SESSION_ID}`. Exit 1
-   means another session holds the run (heartbeat under 15 minutes old): write nothing and stop.
+3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" heartbeat --session ${CLAUDE_SESSION_ID}`. It is an
+   atomic check-and-claim: exit 1 means another session holds a fresh heartbeat. Write nothing, send
+   no report, release nothing, and stop. Otherwise it has written this session's own heartbeat.
 4. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" run running --session ${CLAUDE_SESSION_ID}`. A
    refusal (the run is stopped or finished) ends the session with that message. A paused run (armed
    `--resumable`) continues here after the window reset.
@@ -60,7 +61,9 @@ say so as the other skills do), report the reason and stop.
 ## 4. Loop: usage, next task
 
 Repeat until a stop condition below. Pass `--session ${CLAUDE_SESSION_ID}` on every `queue.mjs`
-`set`, `usage`, `next`, `run` and `heartbeat` call.
+`set`, `usage`, `next`, `run` and `heartbeat` call. Any non-zero exit from one of them (other than
+the documented codes below, such as exit 3 of `usage`) means: start no more tasks and go to step 7.
+Never retry around it.
 
 **Time and marker.** Before each task run `night-lock.mjs status`. Not `valid`, or `ended`: start no
 task, go to step 7. If `lockAlive` is false run `night-lock.mjs keepawake`. No task starts after the
@@ -74,6 +77,8 @@ and act on the printed word:
 - `continue`: run as configured.
 - `lowerEffort`: drop subagent effort one level (high to medium, medium to low) for the rest of the run.
 - `onlyLow`: only T0 and T1 tasks start. Send one `high` push for the run:
+  First `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" warn --session ${CLAUDE_SESSION_ID}`; send
+  the push only when it prints `{"already":false}` (`already:true`: send nothing):
   `node "${CLAUDE_PLUGIN_ROOT}/scripts/notify.mjs" --priority high --title "<project>" --message "Weekly usage at the warn mark, only small tasks"`.
   When `next` returns a T2 or T3 task, take the first pending T0 or T1 task from
   `queue.mjs summary` whose `dependsOn` are all merged; none left: step 7. Leave skipped tasks
@@ -92,14 +97,20 @@ If usage reaches `pause` or `stop` while a task runs, let it reach a pushed chec
 gate status posted), then proceed as above.
 
 **Next task.** `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" next --session ${CLAUDE_SESSION_ID}`.
-It prints `{ task, route, deferred, reason }` and has already deferred tasks whose dependencies are
-not merged (reason "depends on <id>"). `task: null` means no runnable task: step 7. An unmerged,
-waiting, deferred or interrupted dependency never blocks independent tasks. An `interrupted` task
-comes back here and resumes from its branch.
+It prints `{ task, route, deferred, reason, held }` and has already deferred tasks whose dependencies
+are not merged (reason "depends on <id>"). It also converts a stale `running` task (its session is
+gone) to `interrupted`.
+
+- `held: true`: a running task belongs to a live other session, so another session holds the run.
+  Exit now and write nothing: no run-report, no `run` call, no lock release.
+- `task: null` (and not held): no runnable task, step 7.
+- An unmerged, waiting, deferred or interrupted dependency never blocks independent tasks. An
+  `interrupted` task comes back here; a resumed session continues it from its pushed branch.
 
 ## 5. Run the task
 
-1. `queue.mjs set <id> running --session ...`.
+1. `queue.mjs set <id> running --session ...`. It refuses when another live session holds the task:
+   treat that as a non-zero exit (step 4) and stop starting tasks.
 2. Create the task's own worktree from the fresh integration branch (`git fetch <remote> <integration>`,
    then `git worktree add` under `worktree.root` with a new branch named from `branches.work`; an
    interrupted task reuses its pushed branch). Write a `.agent-scope` file in it with the line
@@ -109,6 +120,12 @@ comes back here and resumes from its branch.
    spec path and task id (or the queue brief). The `decisions` lines of the queue are settled; do not
    reopen them. Pass the plugin root and the run's effort level to every subagent.
 4. Night overrides to those skills (they win over the skill text):
+   - The implementer works in the prepared task worktree (it carries `.agent-scope` with
+     `run: <runId>`), so no `isolation: worktree` for it in a night run. If a subagent must use a
+     worktree of its own, write the same `.agent-scope` line there before it starts.
+   - Keep the claim fresh: run `queue.mjs heartbeat --session ...` between build-task steps, after
+     the implement step, after each gate and after each review round. Exit 1 means another session
+     took over: stop at once, write nothing more.
    - Never `AskUserQuestion`. A question you would have to ask, an implementer `STATUS: BLOCKED`, or
      a step that "asks the user" means defer.
    - Never push to or open a PR into `test` or `main`; the base is `branches.integration`.
@@ -125,18 +142,20 @@ comes back here and resumes from its branch.
 
 With the PR open and the final head gated:
 
-1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/risk.mjs" --base <remote>/<integration> --json`;
-   `touchesRisk` true means risk `yes`, else `no`.
-2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" route <id> --risk yes|no` prints `waiting`, `merge`
+1. From the task worktree run
+   `node "${CLAUDE_PLUGIN_ROOT}/scripts/risk.mjs" --base <remote>/<integration> --json` (or
+   `--pr <n>`). `touchesRisk: false` means risk `no`. `touchesRisk: true`, `touchesRisk: null` or any
+   non-zero exit means risk `yes`: unknown never merges. Keep this result as `<risk>`.
+2. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" route <id> --risk <risk>` (read-only) prints `waiting`, `merge`
    or `open`. Act on that word, not on your own reading of the tier.
    - `waiting` (T3 spec or risk path): never merge, at any `night.merge` level. First record it with
      the flag, which refuses a second notification:
-     `queue.mjs set <id> waiting --pr <url> --risk yes --notified --session ...`. Only if that
+     `queue.mjs set <id> waiting --pr <url> --risk <risk> --notified --session ...`. Only if that
      succeeded send one push:
      `notify.mjs --priority default --title "<project>" --message "PR waiting for merge" --click <PR url>`
      (title is the project, never priority 5). Start the next task at once.
    - `open` (`night.merge` is `none`, or the task is not eligible): run no merge command.
-     `queue.mjs set <id> open --pr <url> --risk <yes|no> --session ...`.
+     `queue.mjs set <id> open --pr <url> --risk <risk> --session ...`.
    - `merge` (`lowRisk`, T0 or T1, not from a T3 spec, no risk path, `merge: yes`): merge only when
      the `local-gate` status is green on the PR head and the review verdict is APPROVE. Use the
      command of `/dev-kit:build-task` step 8 with literal values:
@@ -151,7 +170,9 @@ With the PR open and the final head gated:
 ## 7. End of the run
 
 When no runnable task is left, the end time has passed, usage said `stop`, a non-resumable `pause`
-or unreadable usage ended it: run `/dev-kit:run-report`. It writes the report, sends the one closing
+or unreadable usage ended it (never when `next` said `held`, or `heartbeat` exit 1): first
+`queue.mjs run finished --session ...` (`stopped` when usage said `stop`, as in step 4), which also
+sets a task still `running` to `interrupted`. Then run `/dev-kit:run-report`. It writes the report, sends the one closing
 `low` push (counts only, `max` when every task ended deferred), releases the sleep lock and removes
 the marker. A resumable run that paused in step 4 does not run it yet. Send no other notification
 at the end, and no second one for the same PR.
