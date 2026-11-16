@@ -9,7 +9,9 @@
 //   node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>]
 //                                    [--branch <name>] [--risk yes|no] [--notified] [--session <id>]
 //   node queue.mjs usage --window <pct> --weekly <pct> [--session <id>]
-//   node queue.mjs heartbeat --session <id>      (exit 1 when another live session holds the run)
+//   node queue.mjs heartbeat --session <id>      (atomic claim: exit 1 when another live session holds the run)
+//   node queue.mjs busy                          (JSON {busy, reason}; exit 1 while a run is live or unreported)
+//   node queue.mjs warn [--session <id>]         (JSON {already}; sets the run-level warned flag)
 //   node queue.mjs run <running|paused|stopped|finished> [--session <id>]
 //   node queue.mjs summary
 // Exit codes: 0 ok, 1 validation or state failure, 2 bad usage or unreadable input,
@@ -157,6 +159,17 @@ function readSpec(task, config, repoRoot) {
   return { rel, outside, body: null };
 }
 
+/** True when the brief text names a path under the specs folder (relative or absolute, either slash). */
+function briefNamesSpec(brief, config) {
+  const dir = String(config.paths?.specs ?? 'specs/')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+$/, '');
+  if (!dir) return false;
+  const esc = dir.split('/').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\\\/]');
+  return new RegExp(`(?:^|[^\\w.-])${esc}[\\\\/]+[^\\s\\\\/]`, 'i').test(String(brief));
+}
+
 function stricterTier(a, b) {
   return TIERS.indexOf(a) >= TIERS.indexOf(b) ? a : b;
 }
@@ -209,6 +222,9 @@ export function validateQueue({ text, config = {}, repoRoot = process.cwd() }) {
         }
       }
     }
+    if (!t.spec && t.brief && briefNamesSpec(t.brief, config)) {
+      fail(t.id, 'brief-names-spec', `brief names a path under ${config.paths?.specs ?? 'specs/'}; a task from a spec must carry "spec" and "specTier"`);
+    }
     if (t.merge !== 'yes' && t.merge !== 'no') fail(t.id, 'merge-missing', 'merge must be "yes" or "no"');
     for (const d of t.dependsOn) {
       const at = seen.get(d);
@@ -230,9 +246,13 @@ export function emptyState(tasks, queueHash = null) {
   return syncState({ version: 1, queueHash, run: { status: 'running', heartbeat: null, usage: [], unreadableReason: null }, tasks: {} }, tasks);
 }
 
-/** Hashes the parsed tasks only (ids, titles, key lines in order), so reformatting never changes it. */
+/**
+ * Hashes the plan identity: the text before the first task heading (e.g. the "Planned:" line) and the
+ * parsed tasks (ids, titles, key lines in order). Whitespace and line-ending changes do not alter it.
+ */
 export function hashQueue(text) {
-  return crypto.createHash('sha256').update(JSON.stringify(parseQueue(text).tasks)).digest('hex');
+  const { header, tasks } = parseQueue(text);
+  return crypto.createHash('sha256').update(JSON.stringify({ header, tasks })).digest('hex');
 }
 
 function heartbeatAge(state, now = Date.now()) {
@@ -241,11 +261,40 @@ function heartbeatAge(state, now = Date.now()) {
   return Number.isFinite(at) ? now - at : Infinity;
 }
 
-/** Why a stored state must not be replaced (a running task or a heartbeat under 15 minutes old), or null. */
+/** Why a stored state must not be replaced (a heartbeat under 15 minutes old on an unended run), or null. */
 export function resetBlocker(stored, now = Date.now()) {
-  const running = Object.entries(stored?.tasks ?? {}).find(([, e]) => e?.status === 'running');
-  if (running) return `task ${running[0]} is running`;
+  if (stored?.run?.status === 'stopped' || stored?.run?.status === 'finished') return null;
   if (heartbeatAge(stored, now) < HEARTBEAT_FRESH_MS) return 'a heartbeat under 15 minutes old exists';
+  return null;
+}
+
+/**
+ * Returns { state, ids }: every running task is moved to interrupted (branch kept) when the run
+ * heartbeat is stale (15 minutes or more) or missing. The heartbeat itself is left alone.
+ */
+export function abandonStale(state, now = Date.now()) {
+  const next = structuredClone(state);
+  const ids = [];
+  if (heartbeatAge(next, now) >= HEARTBEAT_FRESH_MS) {
+    for (const [id, e] of Object.entries(next.tasks ?? {})) {
+      if (e?.status !== 'running') continue;
+      e.status = 'interrupted';
+      e.updatedAt = new Date(now).toISOString();
+      ids.push(id);
+    }
+  }
+  return { state: next, ids };
+}
+
+/** Why a run must not accept a new writer or starter (unreported live run), or null. Read-only. */
+export function busyReason(stored, now = Date.now()) {
+  if (!stored || typeof stored !== 'object') return null;
+  const status = stored.run?.status ?? 'running';
+  if (status === 'stopped' || status === 'finished') return null;
+  if (heartbeatAge(stored, now) < HEARTBEAT_FRESH_MS) return `run ${status} with a heartbeat under 15 minutes old`;
+  if (status === 'paused') return 'run paused and not yet resumed or reported';
+  const open = Object.entries(stored.tasks ?? {}).find(([, e]) => e?.status === 'running' || e?.status === 'interrupted');
+  if (open) return `run ${status} with task ${open[0]} ${open[1].status} and not reported`;
   return null;
 }
 
@@ -269,6 +318,15 @@ export function applyRun(state, tasks, status, opts = {}) {
     throw new Error(`run: moving from ${from} to ${status} is not allowed (${from} allows ${RUN_TRANSITIONS[from]?.join(', ') || 'nothing'})`);
   }
   const now = opts.now ?? new Date().toISOString();
+  // Pausing, stopping or finishing leaves no task running: it resumes later as interrupted.
+  if (status !== 'running') {
+    for (const e of Object.values(next.tasks)) {
+      if (e.status === 'running') {
+        e.status = 'interrupted';
+        e.updatedAt = now;
+      }
+    }
+  }
   next.run.status = status;
   next.run.heartbeat = { at: now, session: opts.session ?? previousSession(next) };
   return next;
@@ -329,6 +387,12 @@ export function applySet(state, tasks, id, status, opts = {}) {
   const next = syncState(structuredClone(state), tasks);
   const entry = next.tasks[id];
   const from = entry.status;
+  if (status === 'running') {
+    const live = Object.entries(next.tasks).find(([, e]) => e.status === 'running');
+    if (live && heartbeatBlocks(next, opts.session, opts.nowMs ?? Date.now())) {
+      throw new Error(`task ${live[0]} is running under another session with a heartbeat under 15 minutes old; not starting ${id}`);
+    }
+  }
   if (from !== status && !TRANSITIONS[from].includes(status)) {
     throw new Error(`task ${id}: moving from ${from} to ${status} is not allowed (${from} allows ${TRANSITIONS[from].join(', ') || 'nothing'})`);
   }
@@ -369,10 +433,18 @@ export function routeFor(task, config = {}, { risk } = {}) {
  * deferred ("depends on <id>") while any dependency is not merged. Returns
  * { task, route, deferred: [{ id, reason }], reason }. Nothing else starts while a task is running.
  */
-export function nextTask({ tasks, state, config = {} }) {
+export function nextTask({ tasks, state, config = {}, session, now = Date.now() }) {
   const status = Object.fromEntries(tasks.map((t) => [t.id, state?.tasks?.[t.id]?.status ?? 'pending']));
+  const stale = heartbeatAge(state, now) >= HEARTBEAT_FRESH_MS;
+  // A running task with a stale or missing heartbeat is abandoned: it resumes as interrupted.
+  if (stale) for (const t of tasks) if (status[t.id] === 'running') status[t.id] = 'interrupted';
   const running = tasks.find((t) => status[t.id] === 'running');
-  if (running) return { task: null, route: null, deferred: [], reason: `running ${running.id}: one task at a time` };
+  if (running) {
+    const writer = previousSession(state);
+    const held = !session || writer !== session;
+    const who = held ? ` under ${writer ? `session ${writer}` : 'another session'}` : '';
+    return { task: null, route: null, deferred: [], held, reason: `running ${running.id}${who}: one task at a time` };
+  }
   const deferred = [];
   for (const t of tasks) {
     const st = status[t.id];
@@ -384,9 +456,9 @@ export function nextTask({ tasks, state, config = {} }) {
       continue;
     }
     const risk = state?.tasks?.[t.id]?.risk;
-    return { task: t, route: routeFor(t, config, { risk: typeof risk === 'boolean' ? risk : undefined }), deferred, reason: null };
+    return { task: t, route: routeFor(t, config, { risk: typeof risk === 'boolean' ? risk : undefined }), deferred, held: false, reason: null };
   }
-  return { task: null, route: null, deferred, reason: 'no runnable task' };
+  return { task: null, route: null, deferred, held: false, reason: 'no runnable task' };
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +517,7 @@ export function summarize({ tasks, state, config }) {
   return {
     run: state?.run ?? null,
     runStatus: state?.run?.status ?? 'running',
+    warned: state?.run?.warned ?? false,
     counts,
     tasks: rows,
     notStarted: rows.filter((r) => r.status === 'pending').map((r) => r.id),
@@ -513,6 +586,60 @@ function readState(ctx, tasks) {
   return stateForQueue(state, tasks, hash);
 }
 
+/** Minimal task list rebuilt from a stored state (ids only), for reporting on a state that is not this queue's. */
+function storedTasks(state) {
+  return Object.keys(state?.tasks ?? {}).map((id) => ({ id, title: null, tier: null, spec: null, specTier: 'none', merge: null, dependsOn: [] }));
+}
+
+/**
+ * Read-only state access: never writes, archives or resets. Returns { state, tasks, stale }.
+ * When the stored state belongs to another queue it is returned as stored with stale: true.
+ */
+function readStateOnly(ctx, tasks) {
+  const stored = readStoredState(ctx);
+  const hash = ctx.queueHash ?? null;
+  if (stored === null) return { state: emptyState(tasks, hash), tasks, stale: false };
+  if (stored && typeof stored === 'object' && hash && stored.queueHash !== hash) {
+    const st = storedTasks(stored);
+    return { state: syncState(structuredClone(stored), st), tasks: st, stale: true };
+  }
+  return { state: stateForQueue(stored, tasks, hash), tasks, stale: false };
+}
+
+const LOCK_STALE_MS = 10 * 1000;
+const LOCK_WAIT_MS = 8 * 1000;
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Runs fn while holding an exclusive lock file next to the state (create-exclusive, 10 s stale timeout). */
+function withLock(ctx, fn) {
+  const lock = path.join(path.dirname(ctx.stateFile), 'night-state.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lock, 'wx'));
+      break;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { force: true });
+      } catch {
+        // gone already, retry
+      }
+      if (Date.now() > deadline) throw new CliError(`the run state is locked (${lock}); try again`, 1);
+      sleep(20);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+}
+
 function writeState(ctx, state) {
   fs.mkdirSync(path.dirname(ctx.stateFile), { recursive: true });
   const tmp = `${ctx.stateFile}.${process.pid}.tmp`;
@@ -536,6 +663,8 @@ const FLAGS = {
   heartbeat: { value: ['--session'], bool: [] },
   run: { value: ['--session'], bool: [] },
   summary: { value: [], bool: [] },
+  busy: { value: [], bool: [] },
+  warn: { value: ['--session'], bool: [] },
 };
 
 function parseArgs(argv) {
@@ -568,7 +697,9 @@ const HELP = `Usage: node queue.mjs validate | next | route <id> [--risk yes|no]
        node queue.mjs usage --window <pct> --weekly <pct> [--session <id>]
        node queue.mjs next [--session <id>]
        node queue.mjs heartbeat --session <id>
-       node queue.mjs run <running|paused|stopped|finished> [--session <id>]`;
+       node queue.mjs run <running|paused|stopped|finished> [--session <id>]
+       node queue.mjs busy
+       node queue.mjs warn [--session <id>]`;
 
 function run(argv, cwd) {
   const args = parseArgs(argv);
@@ -594,6 +725,33 @@ function run(argv, cwd) {
     return 0;
   }
 
+  if (cmd === 'busy') {
+    const reason = busyReason(readStoredState(ctx));
+    console.log(JSON.stringify({ busy: reason !== null, reason }));
+    return reason === null ? 0 : 1;
+  }
+
+  if (cmd === 'summary' || cmd === 'route') {
+    const tasks = readQueueTasks(ctx);
+    const read = readStateOnly(ctx, tasks);
+    if (cmd === 'summary') {
+      const out = summarize({ tasks: read.tasks, state: read.state, config: read.stale ? null : ctx.config });
+      console.log(JSON.stringify(read.stale ? { stale: true, ...out } : out, null, 2));
+      return 0;
+    }
+    const [id] = positional;
+    const t = tasks.find((x) => x.id === id);
+    if (!t) throw new CliError(`unknown task "${id}"`, 1);
+    const stored = read.stale ? undefined : read.state.tasks[id].risk;
+    const risk = riskFlag(flags.risk) ?? (typeof stored === 'boolean' ? stored : undefined);
+    console.log(routeFor(t, ctx.config, { risk }));
+    return 0;
+  }
+
+  return withLock(ctx, () => writeCommand(ctx, cmd, positional, flags));
+}
+
+function writeCommand(ctx, cmd, positional, flags) {
   if (cmd === 'usage') {
     const reading = { window: flags.window, weekly: flags.weekly };
     const decision = decideUsage(reading, ctx.config.limits);
@@ -622,49 +780,90 @@ function run(argv, cwd) {
       console.error(`queue: a heartbeat under 15 minutes old was written by ${writer ? `session ${writer}` : 'an unknown session'}; another run is live`);
       return 1;
     }
+    let state = stored;
+    if (state === null) {
+      let tasks = [];
+      try {
+        tasks = readQueueTasks(ctx);
+      } catch {
+        // a claim does not need a readable queue
+      }
+      state = emptyState(tasks, ctx.queueHash ?? null);
+    }
+    state.run ??= { status: 'running', heartbeat: null, usage: [], unreadableReason: null };
+    state.run.heartbeat = { at: new Date().toISOString(), session: flags.session };
+    writeState(ctx, state);
+    return 0;
+  }
+
+  if (cmd === 'warn') {
+    const stored = readStoredState(ctx);
+    let state = stored;
+    if (state === null) {
+      let tasks = [];
+      try {
+        tasks = readQueueTasks(ctx);
+      } catch {
+        // a flag does not need a readable queue
+      }
+      state = emptyState(tasks, ctx.queueHash ?? null);
+    }
+    state.run ??= { status: 'running', heartbeat: null, usage: [], unreadableReason: null };
+    const already = state.run.warned === true;
+    if (!already) {
+      state.run.warned = true;
+      state.run.warnedAt = new Date().toISOString();
+      if (flags.session) state.run.warnedBy = flags.session;
+      writeState(ctx, state);
+    }
+    console.log(JSON.stringify({ already }));
     return 0;
   }
 
   const tasks = readQueueTasks(ctx);
-  const state = readState(ctx, tasks);
 
   if (cmd === 'run') {
     const [to] = positional;
     if (!to || positional.length > 1) throw new CliError('run needs <running|paused|stopped|finished>');
     if (!RUN_STATUSES.includes(to)) throw new CliError(`unknown run status "${to}" (use ${RUN_STATUSES.join(', ')})`);
+    // Only starting a run may replace the state of another plan; the others act on what is stored.
+    let state;
+    let runTasks = tasks;
+    if (to === 'running') {
+      state = abandonStale(readState(ctx, tasks)).state;
+    } else {
+      const read = readStateOnly(ctx, tasks);
+      state = read.state;
+      runTasks = read.tasks;
+    }
     let next;
     try {
-      next = applyRun(state, tasks, to, { session: flags.session });
+      next = applyRun(state, runTasks, to, { session: flags.session });
     } catch (err) {
       throw new CliError(err.message, 1);
     }
     writeState(ctx, next);
-    console.log(`run: ${to}`);
+    const counts = summarize({ tasks: runTasks, state: next }).counts;
+    console.log(`run: ${to} (${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')})`);
     return 0;
   }
 
+  const state = readState(ctx, tasks);
+
   if (cmd === 'next') {
-    const result = nextTask({ tasks, state, config: ctx.config });
-    let saved = state;
+    const abandoned = abandonStale(state);
+    const base = abandoned.state;
+    const result = nextTask({ tasks, state: base, config: ctx.config, session: flags.session });
+    let saved = base;
     for (const d of result.deferred) {
       saved = applySet(saved, tasks, d.id, 'deferred', { reason: d.reason, category: 'dependency', session: flags.session });
     }
-    if (flags.session && !result.deferred.length) {
+    if (flags.session && !result.deferred.length && !result.held) {
       saved = structuredClone(saved);
       saved.run.heartbeat = { at: new Date().toISOString(), session: flags.session };
       writeState(ctx, saved);
-    } else if (result.deferred.length) writeState(ctx, saved);
+    } else if (result.deferred.length || abandoned.ids.length) writeState(ctx, saved);
     console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-
-  if (cmd === 'route') {
-    const [id] = positional;
-    const t = tasks.find((x) => x.id === id);
-    if (!t) throw new CliError(`unknown task "${id}"`, 1);
-    const stored = state.tasks[id].risk;
-    const risk = riskFlag(flags.risk) ?? (typeof stored === 'boolean' ? stored : undefined);
-    console.log(routeFor(t, ctx.config, { risk }));
     return 0;
   }
 
@@ -690,10 +889,6 @@ function run(argv, cwd) {
     return 0;
   }
 
-  if (cmd === 'summary') {
-    console.log(JSON.stringify(summarize({ tasks, state, config: ctx.config }), null, 2));
-    return 0;
-  }
   return 2;
 }
 

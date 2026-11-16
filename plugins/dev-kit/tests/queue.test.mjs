@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test } from 'node:test';
@@ -433,6 +433,7 @@ describe('state belongs to one queue', () => {
     assert.equal(JSON.parse(runCli(root, 'summary').stdout).tasks[0].pr, 'https://example.test/pr/1');
     ageHeartbeat(root);
     write(root, 'queue/night.md', queueText(task('a', 'brief: other night')));
+    assert.equal(runCli(root, 'next').status, 0);
     const out = runCli(root, 'summary').stdout;
     const s = JSON.parse(out);
     assert.equal(s.tasks[0].pr, null);
@@ -491,10 +492,12 @@ describe('heartbeat', () => {
     const root = cliRepo();
     assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 0);
     assert.equal(runCli(root, 'set', 'a', 'running').status, 0);
-    assert.equal(readState(root).run.heartbeat.session, null);
-    assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 1);
-    ageHeartbeat(root);
+    assert.equal(readState(root).run.heartbeat.session, 's1');
+    assert.equal(runCli(root, 'heartbeat', '--session', 's2').status, 1);
     assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 0);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'heartbeat', '--session', 's2').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 's2');
   });
   test('CLI set --session stores the session', () => {
     const root = repoWith();
@@ -569,7 +572,7 @@ describe('state reset keeps live runs', () => {
     runCli(root, 'set', 'a', 'open', '--pr', 'u1');
     ageHeartbeat(root);
     const base = queueText(task('a'));
-    const variants = [`${base}\n\n`, `﻿${base}`, base.replace(/\n/g, '\r\n'), base.replace('2026-11-16', '2026-12-01')];
+    const variants = [`${base}\n\n`, `﻿${base}`, base.replace(/\n/g, '\r\n')];
     for (const v of variants) {
       write(root, 'queue/night.md', v);
       const out = runCli(root, 'summary');
@@ -578,22 +581,30 @@ describe('state reset keeps live runs', () => {
     }
     assert.deepEqual(fs.readdirSync(path.join(root, 'queue')).filter((f) => /^night-state\..+\.json$/.test(f) && f !== 'night-state.json'), []);
   });
-  test('a real change with a running task is refused', () => {
+  test('a real change with a running task under a fresh heartbeat is refused by a writer', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    write(root, 'queue/night.md', CHANGED);
+    const r = runCli(root, 'next');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /heartbeat/);
+    assert.equal(readState(root).tasks.a.status, 'running');
+  });
+  test('a running task with a stale heartbeat is abandoned: a real change resets', () => {
     const root = cliRepo();
     runCli(root, 'set', 'a', 'running');
     ageHeartbeat(root);
     write(root, 'queue/night.md', CHANGED);
-    const r = runCli(root, 'summary');
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /running/);
-    assert.equal(readState(root).tasks.a.status, 'running');
+    const r = runCli(root, 'next');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readState(root).tasks.a.status, 'pending');
   });
   test('a real change with a fresh heartbeat is refused', () => {
     const root = cliRepo();
     runCli(root, 'set', 'a', 'running');
     runCli(root, 'set', 'a', 'open', '--pr', 'u');
     write(root, 'queue/night.md', CHANGED);
-    const r = runCli(root, 'summary');
+    const r = runCli(root, 'next');
     assert.equal(r.status, 1);
     assert.match(r.stderr, /heartbeat/);
   });
@@ -604,9 +615,9 @@ describe('state reset keeps live runs', () => {
     ageHeartbeat(root);
     const old = readState(root);
     write(root, 'queue/night.md', CHANGED);
-    const r = runCli(root, 'summary');
+    const r = runCli(root, 'next');
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(JSON.parse(r.stdout).tasks[0].status, 'pending');
+    assert.equal(JSON.parse(runCli(root, 'summary').stdout).tasks[0].status, 'pending');
     const archive = path.join(root, 'queue', `night-state.${old.queueHash.slice(0, 8)}.json`);
     assert.ok(fs.existsSync(archive));
     assert.deepEqual(JSON.parse(fs.readFileSync(archive, 'utf8')), old);
@@ -650,5 +661,225 @@ describe('run status', () => {
   }
   test('an unknown run status is a usage error', () => {
     assert.equal(go(cliRepo(), 'bogus').status, 2);
+  });
+});
+
+function runCliAsync(root, ...args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], { cwd: root });
+    let err = '';
+    child.stderr.on('data', (d) => (err += d));
+    child.on('close', (status) => resolve({ status, stderr: err }));
+  });
+}
+
+describe('F1 a second session cannot end a live run', () => {
+  test('two simultaneous heartbeat claims: exactly one wins', async () => {
+    for (let n = 0; n < 3; n++) {
+      const root = cliRepo();
+      const rs = await Promise.all([runCliAsync(root, 'heartbeat', '--session', 'A'), runCliAsync(root, 'heartbeat', '--session', 'B')]);
+      assert.deepEqual(rs.map((r) => r.status).sort(), [0, 1]);
+      assert.ok(['A', 'B'].includes(readState(root).run.heartbeat.session));
+    }
+  });
+  test('heartbeat claims for itself and refreshes its own; a stale lock file does not block', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'heartbeat', '--session', 'A').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 'A');
+    assert.equal(runCli(root, 'heartbeat', '--session', 'A').status, 0);
+    const lock = path.join(root, 'queue', 'night-state.lock');
+    fs.writeFileSync(lock, '');
+    const old = new Date(Date.now() - 120000);
+    fs.utimesSync(lock, old, old);
+    assert.equal(runCli(root, 'heartbeat', '--session', 'A').status, 0);
+    assert.ok(!fs.existsSync(lock));
+  });
+  test('set running refuses a task running under another fresh session', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'A').status, 0);
+    const r = runCli(root, 'set', 'a', 'running', '--session', 'B');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /heartbeat/);
+    assert.equal(readState(root).run.heartbeat.session, 'A');
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'A').status, 0);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'B').status, 0);
+  });
+  test('next reports held:true for a live run of another session, held:false when nothing is runnable', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--session', 'A');
+    const held = JSON.parse(runCli(root, 'next', '--session', 'B').stdout);
+    assert.equal(held.task, null);
+    assert.equal(held.held, true);
+    assert.match(held.reason, /^running a/);
+    assert.equal(readState(root).run.heartbeat.session, 'A');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u', '--session', 'A');
+    const none = JSON.parse(runCli(root, 'next', '--session', 'B').stdout);
+    assert.equal(none.held, false);
+    assert.equal(none.reason, 'no runnable task');
+  });
+  test('nextTask pure: held flag', () => {
+    const tasks = parseQueue(queueText(task('a'))).tasks;
+    const AT = '2026-11-16T01:00:00.000Z';
+    const st = applySet(emptyState(tasks), tasks, 'a', 'running', { now: AT, session: 'A' });
+    const now = Date.parse(AT) + 60000;
+    assert.equal(nextTask({ tasks, state: st, session: 'B', now }).held, true);
+    assert.equal(nextTask({ tasks, state: st, session: 'A', now }).held, false);
+    assert.equal(nextTask({ tasks, state: st, session: 'B', now: now + 20 * 60000 }).task.id, 'a');
+  });
+});
+
+describe('F2 abandoned running task', () => {
+  test('next converts a stale running task to interrupted and offers it, branch kept', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--branch', 'night/a', '--session', 'A');
+    ageHeartbeat(root);
+    const r = JSON.parse(runCli(root, 'next', '--session', 'B').stdout);
+    assert.equal(r.task.id, 'a');
+    assert.equal(r.held, false);
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+    assert.equal(readState(root).tasks.a.branch, 'night/a');
+  });
+  test('a running task with no heartbeat counts as abandoned', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    const st = readState(root);
+    st.run.heartbeat = null;
+    fs.writeFileSync(path.join(root, 'queue/night-state.json'), JSON.stringify(st));
+    assert.equal(JSON.parse(runCli(root, 'next').stdout).task.id, 'a');
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+  });
+  test('run running converts a stale running task', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--session', 'A');
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'run', 'running', '--session', 'B').status, 0);
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+  });
+  test('run paused sets a running task interrupted', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--session', 'A');
+    assert.equal(runCli(root, 'run', 'paused', '--session', 'A').status, 0);
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+    assert.equal(runCli(root, 'run', 'running', '--session', 'A').status, 0);
+    assert.equal(JSON.parse(runCli(root, 'next', '--session', 'A').stdout).task.id, 'a');
+  });
+  test('set interrupted works from running', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    assert.equal(runCli(root, 'set', 'a', 'interrupted').status, 0);
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+  });
+});
+
+describe('F3 plan identity', () => {
+  test('a new Planned line with identical tasks starts new state; re-saving keeps it', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u1');
+    ageHeartbeat(root);
+    const base = queueText(task('a'));
+    write(root, 'queue/night.md', `${base}\n`);
+    runCli(root, 'next');
+    assert.equal(readState(root).tasks.a.pr, 'u1');
+    write(root, 'queue/night.md', base.replace('2026-11-16', '2026-12-01'));
+    assert.equal(runCli(root, 'next').status, 0);
+    assert.equal(readState(root).tasks.a.pr, null);
+  });
+});
+
+describe('F4 read-only commands and busy', () => {
+  test('summary and route never archive or reset a changed queue', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u1');
+    ageHeartbeat(root);
+    write(root, 'queue/night.md', queueText(task('a', 'brief: new')));
+    const before = fs.readFileSync(path.join(root, 'queue/night-state.json'), 'utf8');
+    const r = runCli(root, 'summary');
+    assert.equal(r.status, 0, r.stderr);
+    const s = JSON.parse(r.stdout);
+    assert.equal(s.stale, true);
+    assert.equal(s.tasks[0].pr, 'u1');
+    assert.equal(runCli(root, 'route', 'a').status, 0);
+    assert.equal(fs.readFileSync(path.join(root, 'queue/night-state.json'), 'utf8'), before);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'queue')).sort(), ['night-state.json', 'night.md']);
+  });
+  test('summary of a matching state has no stale flag and creates no file', () => {
+    const root = cliRepo();
+    const s = JSON.parse(runCli(root, 'summary').stdout);
+    assert.ok(!s.stale);
+    assert.ok(!fs.existsSync(path.join(root, 'queue/night-state.json')));
+  });
+  test('busy: no state is free; fresh running run is busy; terminal is free', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'busy').status, 0);
+    assert.equal(JSON.parse(runCli(root, 'busy').stdout).busy, false);
+    runCli(root, 'run', 'running', '--session', 'A');
+    const b = runCli(root, 'busy');
+    assert.equal(b.status, 1);
+    const j = JSON.parse(b.stdout);
+    assert.equal(j.busy, true);
+    assert.ok(j.reason);
+    runCli(root, 'run', 'finished');
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'busy').status, 0);
+  });
+  test('busy: a paused run and an unfinished task of a stale run are busy', () => {
+    const root = cliRepo();
+    runCli(root, 'run', 'paused');
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'busy').status, 1);
+    const r2 = cliRepo();
+    runCli(r2, 'set', 'a', 'running');
+    ageHeartbeat(r2);
+    assert.equal(runCli(r2, 'busy').status, 1);
+  });
+  test('a finished run does not block a new plan within 15 minutes', () => {
+    const root = cliRepo();
+    runCli(root, 'run', 'finished');
+    write(root, 'queue/night.md', queueText(task('a', 'brief: new')));
+    assert.equal(runCli(root, 'next').status, 0);
+  });
+});
+
+describe('F5 brief naming a spec', () => {
+  const root = repoWith();
+  test('a brief naming a path under specs is rejected when no spec is linked', () => {
+    for (const b of ['implement specs/night-mode.md section 3', 'see `specs/x.md`', 'C:\\Dev\\wt\\specs\\night-mode.md', 'C:/Dev/wt/specs/night-mode.md']) {
+      assert.deepEqual(rules(queueText(task('a', `brief: ${b}`)), root), ['a:brief-names-spec'], b);
+    }
+  });
+  test('ordinary briefs pass', () => {
+    assert.deepEqual(rules(queueText(task('a', 'brief: fix the respecs/ typo in docs')), root), []);
+    assert.deepEqual(rules(queueText(task('a', 'brief: tidy the inspector view')), root), []);
+  });
+});
+
+describe('F9 run finished and stopped', () => {
+  for (const to of ['finished', 'stopped']) {
+    test(`${to} prints the final status and interrupts a running task, even after the queue changed`, () => {
+      const root = cliRepo();
+      runCli(root, 'set', 'a', 'running', '--session', 'A');
+      write(root, 'queue/night.md', queueText(task('a', 'brief: edited')));
+      const r = runCli(root, 'run', to, '--session', 'A');
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(`^run: ${to}`));
+      assert.equal(readState(root).run.status, to);
+      assert.equal(readState(root).tasks.a.status, 'interrupted');
+    });
+  }
+});
+
+describe('F13 warn flag', () => {
+  test('first warn is already:false, later already:true, summary shows it', () => {
+    const root = cliRepo();
+    assert.deepEqual(JSON.parse(runCli(root, 'warn', '--session', 'A').stdout), { already: false });
+    assert.deepEqual(JSON.parse(runCli(root, 'warn', '--session', 'A').stdout), { already: true });
+    assert.equal(JSON.parse(runCli(root, 'summary').stdout).warned, true);
+    assert.equal(readState(root).run.warned, true);
+  });
+  test('summary shows warned false by default', () => {
+    assert.equal(JSON.parse(runCli(cliRepo(), 'summary').stdout).warned, false);
   });
 });
