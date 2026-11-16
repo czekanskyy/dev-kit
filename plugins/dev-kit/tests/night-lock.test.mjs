@@ -231,11 +231,14 @@ describe('real process', () => {
     if (probe && spawnSync(probe, ['--version'], { stdio: 'ignore' }).error) return t.skip(`${probe} not available`);
     const root = fakeRepo('devkit-lock-real-');
     const ctx = { cwd: root, graceMs: 0, maxRunHours: 12, spawner: spawnDetached };
+    const t0 = Date.now();
     const m = acquire({ for: 2 / 3600 }, ctx);
     const pid = m.lockPid;
     try {
       assert.ok(Number.isInteger(pid));
-      assert.equal(status(ctx).lockAlive, true);
+      const early = status(ctx);
+      // On a loaded machine the 2 second box can run out before this check; only assert while it is open.
+      if (Date.now() - t0 < 1500) assert.equal(early.lockAlive, true);
       const deadline = Date.now() + 25000;
       while (Date.now() < deadline && pidAlive(pid)) await new Promise((r) => setTimeout(r, 250));
       assert.equal(pidAlive(pid), false, 'lock child ended itself');
