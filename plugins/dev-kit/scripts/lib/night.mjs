@@ -107,33 +107,85 @@ export function writeMarker(file, marker) {
   }
 }
 
-const LOCK_STALE_MS = 10 * 1000;
-const LOCK_WAIT_MS = 8 * 1000;
+// Test knobs (milliseconds), read at call time. STALE applies only to a lock with no readable owner pid.
+const lockStaleMs = () => Number(process.env.DEVKIT_NIGHT_LOCK_STALE_MS) || 10 * 1000;
+const lockWaitMs = () => Number(process.env.DEVKIT_NIGHT_LOCK_WAIT_MS) || 8 * 1000;
+// A lock whose owner is alive is only broken after this long (guards against pid reuse and hung owners).
+// It must stay well above the longest critical section (acquire holds the lock across the 30 s launcher spawn).
+const LOCK_HARD_STALE_MS = 5 * 60 * 1000;
+
+/** Thrown when the marker lock cannot be taken in time. Callers must fail closed. */
+export class MarkerLockError extends Error {}
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
 /**
- * Runs fn while holding an exclusive lock file next to the marker (create-exclusive, 10 s stale timeout,
- * 8 s bounded wait). Not reentrant. Throws when the lock cannot be taken in time.
+ * A lock is stale when its owner pid (written into the file) is dead, or when it has no readable pid
+ * (crash between create and write) and is older than lockStaleMs(), or when it is older than
+ * LOCK_HARD_STALE_MS. A live owner is never preempted earlier, so a slow critical section cannot lose its lock.
+ */
+function lockIsStale(lock, text) {
+  const age = Date.now() - fs.statSync(lock).mtimeMs;
+  if (age > LOCK_HARD_STALE_MS) return true;
+  const pid = Number.parseInt(text, 10);
+  if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+  return age > lockStaleMs();
+}
+
+/**
+ * Removes a stale lock without clobbering a fresh one: the lock may have been released and retaken
+ * between our check and the removal, so move it aside first and put it back if it is not the one we judged.
+ */
+function breakStale(lock) {
+  const text = fs.readFileSync(lock, 'utf8');
+  if (!lockIsStale(lock, text)) return;
+  const aside = `${lock}.stale.${process.pid}`;
+  fs.renameSync(lock, aside);
+  try {
+    if (fs.readFileSync(aside, 'utf8') !== text) fs.linkSync(aside, lock); // fails if someone retook it
+  } catch {
+    // best effort
+  } finally {
+    fs.rmSync(aside, { force: true });
+  }
+}
+
+/**
+ * Runs fn while holding an exclusive lock file next to the marker (create-exclusive, owner pid inside,
+ * 8 s bounded wait). Not reentrant. Throws MarkerLockError when the lock cannot be taken in time.
  */
 export function withMarkerLock(file, fn) {
   const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(lock), { recursive: true });
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const deadline = Date.now() + lockWaitMs();
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lock, 'wx'));
+      const fd = fs.openSync(lock, 'wx');
+      try {
+        fs.writeSync(fd, `${process.pid}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
       break;
     } catch (err) {
       if (err.code !== 'EEXIST' && err.code !== 'EPERM' && err.code !== 'EACCES') throw err;
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { force: true });
+        breakStale(lock);
       } catch {
         // gone already, retry
       }
-      if (Date.now() > deadline) throw new Error(`the night marker is locked (${lock}); try again`);
+      if (Date.now() > deadline) throw new MarkerLockError(`the night marker is locked (${lock}); try again`);
       sleep(20);
     }
   }

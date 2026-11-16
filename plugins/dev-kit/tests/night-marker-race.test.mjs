@@ -47,4 +47,30 @@ describe('marker read-modify-write is atomic', () => {
     assert.equal(res.filter((r) => r.stdout === 'lost 1').length, 7, JSON.stringify(res));
     assert.equal(readMarker(markerPath(root)).runId, won[0].stdout.slice(4));
   });
+
+  test('a slow spawner does not let a second acquire steal the lock and overwrite the marker', async () => {
+    const root = fakeRepo('devkit-race-');
+    const env = { ...process.env, DEVKIT_NIGHT_LOCK_STALE_MS: '200', DEVKIT_NIGHT_LOCK_WAIT_MS: '8000' };
+    const run = (src) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e', src], { cwd: root, env });
+        let stdout = '';
+        child.stdout.on('data', (d) => (stdout += d));
+        child.on('close', () => resolve(stdout.trim()));
+      });
+    const slow = `import { acquire } from ${url('night-lock.mjs')};
+      const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      try { const m = acquire({ for: 1 }, { spawner: () => { sleep(1500); return 1; } }); console.log('won ' + m.runId); }
+      catch (e) { console.log('lost ' + e.code); }`;
+    const fast = `import { acquire } from ${url('night-lock.mjs')};
+      try { const m = acquire({ for: 2 }, { spawner: () => 2 }); console.log('won ' + m.runId); }
+      catch (e) { console.log('lost ' + e.code); }`;
+    const first = run(slow);
+    await new Promise((r) => setTimeout(r, 600));
+    const second = run(fast);
+    const res = await Promise.all([first, second]);
+    assert.equal(res.filter((r) => r.startsWith('won')).length, 1, JSON.stringify(res));
+    assert.equal(res[0].startsWith('won'), true, JSON.stringify(res));
+    assert.equal(readMarker(markerPath(root)).runId, res[0].slice(4));
+  });
 });

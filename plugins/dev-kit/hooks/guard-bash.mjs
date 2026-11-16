@@ -20,7 +20,7 @@ import {
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
 import { SCOPE_DENY_REASON, namesOwnAgentScope, protectedScopeRoot } from './guard-files.mjs';
-import { markerPath, readMarker, registerSession } from '../scripts/lib/night.mjs';
+import { MarkerLockError, markerPath, readMarker, registerSession } from '../scripts/lib/night.mjs';
 import { baseName, parseCommandLine, parseOpts } from '../scripts/lib/shell.mjs';
 import { analyzeRisk } from '../scripts/risk.mjs';
 
@@ -1533,7 +1533,8 @@ export function registerClaim(input, opts = {}) {
     if (!marker || id !== marker.runId) return false;
     if ((opts.now ?? Date.now()) < Date.parse(marker.start)) return false;
     return registerSession(file, sessionId, opts);
-  } catch {
+  } catch (err) {
+    if (err instanceof MarkerLockError) throw err; // fail closed: the caller denies the command
     return false;
   }
 }
@@ -1541,8 +1542,14 @@ export function registerClaim(input, opts = {}) {
 if (isMain(import.meta.url)) {
   try {
     const input = readHookInput();
-    registerClaim(input);
-    const v = runHook(input);
+    let v;
+    try {
+      registerClaim(input);
+      v = runHook(input);
+    } catch (err) {
+      if (!(err instanceof MarkerLockError)) throw err;
+      v = { decision: 'deny', reason: 'Night mode: the session could not be registered (marker lock busy); the claim is refused. Retry.' };
+    }
     if (v) emitPreToolUse(v.decision, v.reason, input);
   } catch {
     // Never block on an internal error.
