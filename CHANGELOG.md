@@ -32,7 +32,7 @@ Night mode: a planned, time-boxed, unattended run that asks nothing and defers w
   long-path, device and UNC path forms, symlinks and short names.
 - Guard: `git commit` in a linked worktree on an unprotected work branch of another repository no longer
   asks.
-- Evals for `plan-night`, `night-run` and `run-report`.
+- No evals for the night skills: they set `disable-model-invocation`, so the eval harness cannot start them. Their behaviour is covered by the script tests and the trial runs.
 
 ## 0.3.0
 
