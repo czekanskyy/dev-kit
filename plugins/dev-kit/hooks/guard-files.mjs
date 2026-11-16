@@ -154,8 +154,12 @@ export function evaluateFileTool(input, opts = {}) {
     }
   }
 
-  const night = nightWriteDeny(input, abs, target, { config, root, now: opts.now });
-  if (night) out.push(night);
+  try {
+    const night = nightWriteDeny(input, abs, target, { config, root, now: opts.now });
+    if (night) out.push(night);
+  } catch {
+    // A failing night helper must not discard the other verdicts.
+  }
 
   const pluginRoot = opts.pluginRoot ?? env.CLAUDE_PLUGIN_ROOT;
   const isClaudeConfig =

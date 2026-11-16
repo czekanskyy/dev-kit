@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { evaluateFileTool } from '../hooks/guard-files.mjs';
 import { registerClaim, runHook } from '../hooks/guard-bash.mjs';
-import { emitPreToolUse, nightVerdict } from '../scripts/lib/hook.mjs';
+import { NIGHT_DENY_PREFIX, emitPreToolUse, nightVerdict } from '../scripts/lib/hook.mjs';
 import {
   EXPIRY_GRACE_MS,
   buildMarker,
@@ -331,5 +333,179 @@ describe('claim registers the session', () => {
     const { root, file } = setup();
     writeMarker(file, validMarker());
     assert.equal(registerClaim(bashInput(root, CLAIM, 's'), { now: NOW + 9 * HOUR }), false);
+  });
+});
+
+describe('claim registration is narrow (review findings)', () => {
+  const claimOk = (cmd, { tool = 'Bash', now = NOW } = {}) => {
+    const { root, file } = setup();
+    writeMarker(file, validMarker());
+    const input = { ...bashInput(root, cmd, 'sess'), tool_name: tool };
+    const r = registerClaim(input, { now });
+    assert.equal(r, readMarker(file, { now }).sessions.includes('sess'), cmd);
+    return r;
+  };
+  test('requires --run and the marker run id', () => {
+    assert.equal(claimOk('node /p/night-lock.mjs claim'), false);
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run wrong'), false);
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run'), false);
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run run-1'), true);
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run=run-1'), true);
+  });
+  test('does not register before the run starts', () => {
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run run-1', { now: NOW - 2 * HOUR }), false);
+  });
+  test('does not register after && or || or in a conditional or after another command', () => {
+    for (const cmd of [
+      'false && node /p/night-lock.mjs claim --run run-1',
+      'false || node /p/night-lock.mjs claim --run run-1',
+      'true; node /p/night-lock.mjs claim --run run-1',
+      'cd /x && node /p/night-lock.mjs claim --run run-1',
+      'if false; then node /p/night-lock.mjs claim --run run-1; fi',
+      'echo $(node /p/night-lock.mjs claim --run run-1)',
+      'bash -c "node /p/night-lock.mjs claim --run run-1"',
+    ]) {
+      assert.equal(claimOk(cmd), false, cmd);
+    }
+  });
+  test('claim --help does not register', () => {
+    assert.equal(claimOk('node /p/night-lock.mjs claim --help'), false);
+    assert.equal(claimOk('node /p/night-lock.mjs claim --run run-1 --help'), false);
+  });
+  test('node flags before the script are skipped; PowerShell call operator works', () => {
+    assert.equal(claimOk('node --no-warnings /p/night-lock.mjs claim --run run-1'), true);
+    assert.equal(claimOk('node -r ./x.js /p/night-lock.mjs claim --run run-1'), true);
+    assert.equal(claimOk('& node "C:\\kit\\scripts\\night-lock.mjs" claim --run run-1', { tool: 'PowerShell' }), true);
+    assert.equal(claimOk('& "node" "C:\\kit\\scripts\\night-lock.mjs" claim --run run-1', { tool: 'PowerShell' }), true);
+  });
+});
+
+describe('marker validity and fallback (review findings)', () => {
+  test('a far-future expiry cannot extend a marker past end plus 30 minutes', () => {
+    const { file } = setup();
+    const m = { ...validMarker(), start: new Date(NOW - 10 * HOUR).toISOString(), end: new Date(NOW - HOUR).toISOString(), expiry: '2099-01-01T00:00:00Z' };
+    writeMarker(file, m);
+    assert.equal(readMarker(file, { now: NOW }), null);
+    writeMarker(file, { ...m, end: new Date(NOW - 10 * 60 * 1000).toISOString() });
+    assert.ok(readMarker(file, { now: NOW }));
+  });
+  test('.agent-scope fallback needs a run: line, not a bare token', () => {
+    const { root, file } = setup();
+    writeMarker(file, validMarker([]));
+    const wt = makeWorktree(root, 'slot');
+    const input = { session_id: 'subagent', cwd: wt };
+    for (const text of ['run-1\n', 'note run-1 here\n', 'xrun: run-1\n', 'run: run-1-extra\n']) {
+      fs.writeFileSync(path.join(wt, '.agent-scope'), text);
+      assert.equal(isNightSession(input, { now: NOW }), false, text);
+    }
+    fs.writeFileSync(path.join(wt, '.agent-scope'), 'slot\r\n  run: run-1  \r\n');
+    assert.equal(isNightSession(input, { now: NOW }), true);
+  });
+});
+
+describe('queue and marker path matching (review findings)', () => {
+  const win = process.platform === 'win32';
+  function denied(root, config, p) {
+    const v = evaluateFileTool({ tool_name: 'Write', tool_input: { file_path: p }, cwd: root, session_id: 's1' }, { config, exec: mockExec(), env: {}, now: NOW });
+    return v?.decision === 'deny';
+  }
+  test('trailing dot, other case and stream suffix on win32', { skip: win ? false : 'win32 path rules only' }, () => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    for (const p of ['queue/night.md.', 'queue/night.md ', 'queue/NIGHT.MD', 'queue\\Night.md', 'queue/night.md::$DATA', 'queue/night.md:stream', 'queue/night.md.::$DATA']) {
+      assert.equal(denied(root, config, p), true, p);
+    }
+    assert.equal(denied(root, config, file.toUpperCase()), true, 'marker upper case');
+    assert.equal(denied(root, config, `${file}::$DATA`), true, 'marker stream');
+    assert.equal(denied(root, config, 'queue/night.md.bak'), false);
+    assert.equal(denied(root, config, 'queue/night.mdx'), false);
+  });
+  test('case-insensitive on darwin, exact on linux', { skip: win ? 'covered by the win32 test' : false }, () => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    assert.equal(denied(root, config, 'queue/NIGHT.MD'), process.platform === 'darwin');
+    assert.equal(denied(root, config, 'queue/night.md'), true);
+  });
+  test('a path through a symlinked or junctioned parent is the same file', (t) => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    fs.mkdirSync(path.join(root, 'queue'), { recursive: true });
+    const link = path.join(root, 'alias');
+    try {
+      fs.symlinkSync(path.join(root, 'queue'), link, win ? 'junction' : 'dir');
+    } catch (e) {
+      t.skip(`cannot create a link here (${e.code})`);
+      return;
+    }
+    assert.equal(denied(root, config, path.join(link, 'night.md')), true);
+    assert.equal(denied(root, config, path.join(link, 'other.md')), false);
+  });
+});
+
+describe('night helper failures never loosen a verdict', () => {
+  test('a throwing night check in guard-files keeps the other verdicts', () => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    const broken = new Proxy(config, {
+      get: (t, k) => {
+        if (k === 'paths') throw new Error('boom');
+        return t[k];
+      },
+    });
+    const v = evaluateFileTool({ tool_name: 'Write', tool_input: { file_path: 'src/generated/types.ts' }, cwd: root, session_id: 's1' }, { config: broken, exec: mockExec(), env: {}, now: NOW });
+    assert.equal(v?.decision, 'deny');
+  });
+  test('nightVerdict keeps an ask when the session check throws, and never allows', () => {
+    const input = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('boom');
+        },
+      },
+    );
+    assert.deepEqual(nightVerdict({ decision: 'ask', reason: 'r' }, input), { decision: 'ask', reason: 'r' });
+    assert.deepEqual(nightVerdict({ decision: 'deny', reason: 'r' }, input), { decision: 'deny', reason: 'r' });
+    assert.equal(nightVerdict({ decision: 'allow', reason: 'r' }, input), null);
+  });
+});
+
+describe('hook entry points', () => {
+  const HOOKS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
+  const live = (sessions) => {
+    const root = fakeRepo('devkit-night-spawn-');
+    const now = Date.now();
+    writeMarker(markerPath(root), { ...buildMarker({ runId: 'run-1', start: now - HOUR, end: now + 4 * HOUR }), sessions });
+    return root;
+  };
+  const spawn = (hook, input) => {
+    const r = spawnSync(process.execPath, [path.join(HOOKS, hook)], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: '' } });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput : null;
+  };
+  const bash = (root, sid) => ({ tool_name: 'Bash', tool_input: { command: 'npm install left-pad' }, cwd: root, session_id: sid });
+  const edit = (root, sid) => ({ tool_name: 'Edit', tool_input: { file_path: '.claude/settings.json' }, cwd: root, session_id: sid });
+
+  test('guard-bash: registered session gets a deny with the night prefix', () => {
+    const out = spawn('guard-bash.mjs', bash(live(['s1']), 's1'));
+    assert.equal(out.permissionDecision, 'deny');
+    assert.ok(out.permissionDecisionReason.startsWith(NIGHT_DENY_PREFIX));
+  });
+  test('guard-bash: unregistered session still gets ask', () => {
+    assert.equal(spawn('guard-bash.mjs', bash(live(['s1']), 's2')).permissionDecision, 'ask');
+  });
+  test('guard-files: registered session gets a deny with the night prefix', () => {
+    const out = spawn('guard-files.mjs', edit(live(['s1']), 's1'));
+    assert.equal(out.permissionDecision, 'deny');
+    assert.ok(out.permissionDecisionReason.startsWith(NIGHT_DENY_PREFIX));
+  });
+  test('guard-files: unregistered session still gets ask', () => {
+    assert.equal(spawn('guard-files.mjs', edit(live(['s1']), 's2')).permissionDecision, 'ask');
+  });
+  test('guard-bash: a claim command registers the session end to end', () => {
+    const root = live([]);
+    const claim = { tool_name: 'Bash', tool_input: { command: 'node /p/night-lock.mjs claim --run run-1' }, cwd: root, session_id: 'sx' };
+    spawn('guard-bash.mjs', claim);
+    assert.equal(spawn('guard-bash.mjs', bash(root, 'sx')).permissionDecision, 'deny');
   });
 });
