@@ -576,10 +576,35 @@ describe('.agent-scope is protected for night sessions (review finding)', () => 
       assert.equal(fileV(wt, config, tool, '.AGENT-SCOPE.'), 'deny');
     }
   });
-  test('a registered night session is denied too, even without a run: line', () => {
+  test('the registered orchestrator can create .agent-scope in a new task worktree', () => {
     const { root, file, config } = setup();
     writeMarker(file, validMarker(['s1']));
-    assert.equal(fileV(root, { ...config, repoRoot: root }, 'Write', '.agent-scope', 's1'), 'deny');
+    const fresh = path.join(root, '.claude', 'worktrees', 'fresh');
+    const cfg = { ...config, repoRoot: root };
+    assert.equal(fileV(root, cfg, 'Write', path.join(fresh, '.agent-scope'), 's1'), 'allow');
+    assert.equal(fileV(root, cfg, 'Write', '.agent-scope', 's1'), 'allow');
+    assert.equal(bashV(root, cfg, `echo 'run: run-1' > ${path.join(fresh, '.agent-scope').replace(/\\/g, '/')}`, 's1'), 'allow');
+    assert.equal(bashV(root, cfg, 'printf x | tee .claude/worktrees/fresh/.agent-scope', 's1'), 'allow');
+  });
+  test('a subagent may write another worktree scope file but not its own', () => {
+    const { root, wt, config } = scopeSetup();
+    const other = makeWorktree(root, 'other');
+    assert.equal(fileV(wt, config, 'Write', path.join(other, '.agent-scope')), 'allow');
+    assert.equal(fileV(wt, config, 'Write', path.join(wt, '.agent-scope')), 'deny');
+  });
+  test('redirection-only, git --output, PowerShell colon form and drive-relative names are denied', () => {
+    const { wt, config } = scopeSetup();
+    for (const c of ['> .agent-scope', ': > ./.agent-scope', 'git diff --output=.agent-scope', 'git log --output=.agent-scope HEAD', 'git show --output=.agent-scope']) {
+      assert.equal(bashV(wt, config, c), 'deny', c);
+    }
+    for (const c of ['git diff', 'git log --oneline']) assert.equal(bashV(wt, config, c), 'allow', c);
+    const ps = (command) => {
+      const v = runHook({ tool_name: 'PowerShell', tool_input: { command }, cwd: wt, session_id: 'other' }, { config, exec: mockExec(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {}, now: NOW });
+      return v ? v.decision : 'allow';
+    };
+    assert.equal(ps('Set-Content -LiteralPath:.agent-scope -Value x'), 'deny');
+    assert.equal(ps('Remove-Item -Path:.agent-scope'), 'deny');
+    assert.equal(fileV(wt, config, 'Write', 'C:.agent-scope'), 'deny');
   });
   test('a plain daytime scope file stays editable', () => {
     const { wt, config } = scopeSetup('slot-1\n');

@@ -19,7 +19,7 @@ import {
   toAbsolute,
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
-import { SCOPE_DENY_REASON, namesAgentScope, scopeProtected } from './guard-files.mjs';
+import { SCOPE_DENY_REASON, namesOwnAgentScope, protectedScopeRoot } from './guard-files.mjs';
 import { markerPath, readMarker, registerSession } from '../scripts/lib/night.mjs';
 import { baseName, parseCommandLine, parseOpts } from '../scripts/lib/shell.mjs';
 import { analyzeRisk } from '../scripts/risk.mjs';
@@ -90,7 +90,7 @@ export function makeContext(opts = {}) {
     repoRoot: normalizePath(config.repoRoot ?? findRepoRoot(cwd) ?? cwd),
     tmpDir: normalizePath(opts.tmpDir ?? os.tmpdir()),
     homeDir: normalizePath(opts.homeDir ?? os.homedir()),
-    scopeProtected: Boolean(opts.scopeProtected),
+    scopeProtected: opts.scopeProtected || null,
     pluginRoot: opts.pluginRoot ?? (opts.env ?? process.env).CLAUDE_PLUGIN_ROOT ?? null,
     branchOverride: opts.branch,
     /** Runs an external command inside the shared time budget. Throws BudgetExhausted when it is spent. */
@@ -1385,16 +1385,23 @@ function evalClaudeConfig(cmd, ctx, state, out) {
 
 /** A session tied to a night run never writes .agent-scope: any command naming it, except plain readers, is denied. */
 const SCOPE_READERS = new Set(['cat', 'less', 'head', 'tail', 'more', 'bat', 'batcat', 'type', 'grep', 'egrep', 'fgrep', 'rg', 'get-content', 'gc', 'select-string', 'sls', 'ls', 'dir', 'wc', 'stat', 'test', '[']);
+// Known limit: interpreter writes that build the name at run time (heredoc scripts, string concatenation)
+// are not caught. This is a best-effort guard against a cooperative agent, not a sandbox.
 function evalAgentScope(cmd, ctx, state, out) {
   const deny = () => out.push({ decision: 'deny', reason: SCOPE_DENY_REASON });
+  const root = ctx.scopeProtected;
+  // Only the session's own .agent-scope is protected; other worktrees' files may be written.
+  const own = (a) => namesOwnAgentScope(a, state.cwd, root);
   for (const r of cmd.redirects ?? []) {
-    if (r.op !== '<' && namesAgentScope(r.target, state.cwd)) return deny();
+    if (r.op !== '<' && own(r.target)) return deny();
   }
   if (!cmd.argv.length) return;
   const b = baseName(cmd.argv[0]);
+  // Option forms that carry a path: of=x, --output=x, PowerShell -LiteralPath:x
+  const named = (a) => own(a.replace(/^(?:of=|-{1,2}[\w-]+[:=])/, ''));
+  if (b === 'git' && cmd.argv.slice(1).some((a) => /^--output(?:=|$)/.test(a) && named(a))) return deny();
   if (SCOPE_READERS.has(b)) return;
   if (b === 'git' && cmd.argv.slice(1).some((a) => ['status', 'diff', 'log', 'show', 'check-ignore'].includes(a))) return;
-  const named = (a) => namesAgentScope(a.replace(/^of=/, ''), state.cwd);
   if (cmd.argv.slice(1).some(named)) return deny();
   if (INTERPRETERS.has(b) && cmd.argv.some((a) => /\.agent-scope/i.test(a))) deny();
 }
@@ -1436,6 +1443,7 @@ export function evaluateBash(command, ctxOpts = {}) {
     try {
       if (!cmd.argv.length) {
         evalData(cmd, ctx, state, out, cmds);
+        if (ctx.scopeProtected) evalAgentScope(cmd, ctx, state, out);
         continue;
       }
       const b = baseName(cmd.argv[0]);
@@ -1476,7 +1484,7 @@ export function runHook(input, opts = {}) {
   if (!command.trim()) return null;
   const dialect = input.tool_name === 'PowerShell' ? 'powershell' : 'bash';
   try {
-    return evaluateBash(command, { cwd: input.cwd || process.cwd(), dialect, scopeProtected: scopeProtected(input, { now: opts.now }), ...opts });
+    return evaluateBash(command, { cwd: input.cwd || process.cwd(), dialect, scopeProtected: protectedScopeRoot(input), ...opts });
   } catch (err) {
     if (RISKY_UNPARSED.test(command)) {
       return { decision: 'ask', reason: `The safety hook could not analyse this command (${err?.message ?? err}). It looks like a push, merge or delete, so confirm it by hand.` };
