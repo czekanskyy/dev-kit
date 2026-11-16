@@ -486,6 +486,9 @@ describe('heartbeat', () => {
     assert.equal(runCli(root, 'usage', '--window', '10', '--weekly', '10', '--session', 's9').status, 0);
     assert.equal(readState(root).run.heartbeat.session, 's9');
     assert.equal(runCli(root, 'next', '--session', 's8').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 's9');
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'next', '--session', 's8').status, 0);
     assert.equal(readState(root).run.heartbeat.session, 's8');
   });
   test('heartbeat check: no heartbeat passes, unknown fresh writer blocks, stale heartbeat passes', () => {
@@ -903,6 +906,21 @@ describe('R5 ownership, recovery, terminal runs, plan identity', () => {
     assert.equal(st.run.status, 'running');
     assert.equal(st.run.heartbeat.session, 'B');
     assert.equal(runCli(root, 'run', 'finished', '--session', 'B').status, 0);
+  });
+  test('a late next by the old session writes nothing while another live session holds the run', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'A').status, 0);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'heartbeat', '--session', 'B').status, 0);
+    const before = fs.readFileSync(path.join(root, 'queue/night-state.json'), 'utf8');
+    const r = runCli(root, 'next', '--session', 'A');
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.task, null);
+    assert.equal(out.held, true);
+    assert.equal(fs.readFileSync(path.join(root, 'queue/night-state.json'), 'utf8'), before);
+    assert.equal(readState(root).run.heartbeat.session, 'B');
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'B').status, 0);
   });
   test('mutations without --session and with a stale holder still work', () => {
     const root = cliRepo();
