@@ -8,7 +8,9 @@
 //   node queue.mjs route <id> [--risk yes|no]
 //   node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>]
 //                                    [--branch <name>] [--risk yes|no] [--notified] [--session <id>]
-//   node queue.mjs usage --window <pct> --weekly <pct>
+//   node queue.mjs usage --window <pct> --weekly <pct> [--session <id>]
+//   node queue.mjs heartbeat --session <id>      (exit 1 when another live session holds the run)
+//   node queue.mjs run <running|paused|stopped|finished> [--session <id>]
 //   node queue.mjs summary
 // Exit codes: 0 ok, 1 validation or state failure, 2 bad usage or unreadable input,
 //             3 usage reading unreadable (prints "unreadable"; start no new task).
@@ -135,25 +137,41 @@ function insideDir(dir, abs) {
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/** repoRoot may be one root or a list tried in order (main checkout first, then the current one). */
 function readSpec(task, config, repoRoot) {
   const rel = specPath(task.spec);
-  const abs = path.resolve(repoRoot, rel);
-  if (!rel || !insideDir(specsDir(config, repoRoot), abs)) return { rel, outside: true, body: null };
-  try {
-    if (fs.statSync(abs).isFile()) return { rel, outside: false, body: fs.readFileSync(abs, 'utf8') };
-  } catch {
-    // missing or unreadable
+  const roots = [].concat(repoRoot);
+  let outside = false;
+  for (const root of roots) {
+    const abs = path.resolve(root, rel);
+    if (!rel || !insideDir(specsDir(config, root), abs)) {
+      outside = true;
+      continue;
+    }
+    try {
+      if (fs.statSync(abs).isFile()) return { rel, outside: false, body: fs.readFileSync(abs, 'utf8') };
+    } catch {
+      // missing or unreadable here, try the next root
+    }
   }
-  return { rel, outside: false, body: null };
+  return { rel, outside, body: null };
 }
 
-/** Returns the tasks with specTier taken from the linked spec header when there is one. */
+function stricterTier(a, b) {
+  return TIERS.indexOf(a) >= TIERS.indexOf(b) ? a : b;
+}
+
+/**
+ * Returns the tasks with specTier resolved from the linked spec. Fails closed: an unreadable spec or
+ * one without a Tier header counts as T3, and the stricter of declared and header tier wins.
+ */
 export function withSpecTiers(tasks, config = {}, repoRoot = process.cwd()) {
   return tasks.map((t) => {
     if (!t.spec) return t;
     const { body } = readSpec(t, config, repoRoot);
-    const tier = body === null ? null : parseSpecHeader(body).tier;
-    return tier ? { ...t, specTier: tier } : t;
+    const header = body === null ? null : parseSpecHeader(body).tier;
+    const tier = header ?? 'T3';
+    return { ...t, specTier: t.specTierDeclared ? stricterTier(t.specTierDeclared, tier) : tier };
   });
 }
 
@@ -212,8 +230,53 @@ export function emptyState(tasks, queueHash = null) {
   return syncState({ version: 1, queueHash, run: { status: 'running', heartbeat: null, usage: [], unreadableReason: null }, tasks: {} }, tasks);
 }
 
+/** Hashes the parsed tasks only (ids, titles, key lines in order), so reformatting never changes it. */
 export function hashQueue(text) {
-  return crypto.createHash('sha256').update(String(text ?? '')).digest('hex');
+  return crypto.createHash('sha256').update(JSON.stringify(parseQueue(text).tasks)).digest('hex');
+}
+
+function heartbeatAge(state, now = Date.now()) {
+  const hb = state?.run?.heartbeat;
+  const at = Date.parse(typeof hb === 'string' ? hb : (hb?.at ?? ''));
+  return Number.isFinite(at) ? now - at : Infinity;
+}
+
+/** Why a stored state must not be replaced (a running task or a heartbeat under 15 minutes old), or null. */
+export function resetBlocker(stored, now = Date.now()) {
+  const running = Object.entries(stored?.tasks ?? {}).find(([, e]) => e?.status === 'running');
+  if (running) return `task ${running[0]} is running`;
+  if (heartbeatAge(stored, now) < HEARTBEAT_FRESH_MS) return 'a heartbeat under 15 minutes old exists';
+  return null;
+}
+
+/**
+ * Run status moves: running to paused, stopped or finished; paused to running, stopped or finished;
+ * stopped and finished are terminal. Repeating the current status is allowed.
+ */
+export const RUN_STATUSES = ['running', 'paused', 'stopped', 'finished'];
+const RUN_TRANSITIONS = {
+  running: ['paused', 'stopped', 'finished'],
+  paused: ['running', 'stopped', 'finished'],
+  stopped: [],
+  finished: [],
+};
+
+export function applyRun(state, tasks, status, opts = {}) {
+  if (!RUN_STATUSES.includes(status)) throw new Error(`unknown run status "${status}" (use ${RUN_STATUSES.join(', ')})`);
+  const next = syncState(structuredClone(state), tasks);
+  const from = next.run.status ?? 'running';
+  if (from !== status && !RUN_TRANSITIONS[from]?.includes(status)) {
+    throw new Error(`run: moving from ${from} to ${status} is not allowed (${from} allows ${RUN_TRANSITIONS[from]?.join(', ') || 'nothing'})`);
+  }
+  const now = opts.now ?? new Date().toISOString();
+  next.run.status = status;
+  next.run.heartbeat = { at: now, session: opts.session ?? previousSession(next) };
+  return next;
+}
+
+function previousSession(state) {
+  const hb = state?.run?.heartbeat;
+  return hb && typeof hb === 'object' ? (hb.session ?? null) : null;
 }
 
 /** Keeps a stored state only when it belongs to this queue (same hash); otherwise starts fresh. */
@@ -282,7 +345,7 @@ export function applySet(state, tasks, id, status, opts = {}) {
   if (status === 'running' && !entry.startedAt) entry.startedAt = now;
   if (['merged', 'open', 'waiting', 'deferred'].includes(status)) entry.finishedAt = now;
   entry.updatedAt = now;
-  next.run.heartbeat = { at: now, session: opts.session ?? null };
+  next.run.heartbeat = { at: now, session: opts.session ?? previousSession(next) };
   return next;
 }
 
@@ -381,6 +444,7 @@ export function summarize({ tasks, state, config }) {
   });
   return {
     run: state?.run ?? null,
+    runStatus: state?.run?.status ?? 'running',
     counts,
     tasks: rows,
     notStarted: rows.filter((r) => r.status === 'pending').map((r) => r.id),
@@ -398,9 +462,12 @@ function mainCheckout(cwd, fallback) {
 function loadContext(cwd) {
   const config = loadConfig(cwd);
   const root = config.repoRoot;
-  const queueFile = path.resolve(mainCheckout(cwd, root), config.paths?.queue ?? 'queue/night.md');
+  const main = mainCheckout(cwd, root);
+  const queueFile = path.resolve(main, config.paths?.queue ?? 'queue/night.md');
   const stateFile = path.join(path.dirname(queueFile), STATE_FILE);
-  return { config, root, queueFile, stateFile };
+  // Specs: the main checkout first, then the current one; neither readable fails closed.
+  const specRoots = [...new Set([main, root])];
+  return { config, root, queueFile, stateFile, specRoots };
 }
 
 function readQueueTasks(ctx) {
@@ -411,18 +478,39 @@ function readQueueTasks(ctx) {
     throw new CliError(`cannot read the queue ${ctx.queueFile}: ${err.message}`, 2);
   }
   ctx.queueHash = hashQueue(text);
-  return withSpecTiers(parseQueue(text).tasks, ctx.config, ctx.root);
+  return withSpecTiers(parseQueue(text).tasks, ctx.config, ctx.specRoots);
+}
+
+function readStoredState(ctx) {
+  try {
+    return JSON.parse(fs.readFileSync(ctx.stateFile, 'utf8').replace(/^﻿/, ''));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw new CliError(`cannot read ${ctx.stateFile}: ${err.message}`, 2);
+  }
 }
 
 function readState(ctx, tasks) {
-  let state;
-  try {
-    state = JSON.parse(fs.readFileSync(ctx.stateFile, 'utf8').replace(/^﻿/, ''));
-  } catch (err) {
-    if (err.code === 'ENOENT') return emptyState(tasks, ctx.queueHash ?? null);
-    throw new CliError(`cannot read ${ctx.stateFile}: ${err.message}`, 2);
+  const state = readStoredState(ctx);
+  if (state === null) return emptyState(tasks, ctx.queueHash ?? null);
+  const hash = ctx.queueHash ?? null;
+  if (state && typeof state === 'object' && hash && state.queueHash !== hash) {
+    const why = resetBlocker(state);
+    if (why) {
+      throw new CliError(
+        `the queue changed but the stored run state is live (${why}); refusing to reset ${ctx.stateFile}. Wait for the run to end or let the heartbeat go stale`,
+        1,
+      );
+    }
+    const stem = path.join(path.dirname(ctx.stateFile), `night-state.${String(state.queueHash ?? 'nohash').slice(0, 8)}`);
+    let archive = `${stem}.json`;
+    for (let n = 1; fs.existsSync(archive); n++) archive = `${stem}-${n}.json`;
+    fs.copyFileSync(ctx.stateFile, archive);
+    const fresh = emptyState(tasks, hash);
+    writeState(ctx, fresh);
+    return fresh;
   }
-  return stateForQueue(state, tasks, ctx.queueHash ?? null);
+  return stateForQueue(state, tasks, hash);
 }
 
 function writeState(ctx, state) {
@@ -441,10 +529,12 @@ class CliError extends Error {
 
 const FLAGS = {
   set: { value: ['--pr', '--reason', '--category', '--branch', '--risk', '--session'], bool: ['--notified'] },
-  usage: { value: ['--window', '--weekly'], bool: [] },
+  usage: { value: ['--window', '--weekly', '--session'], bool: [] },
   route: { value: ['--risk'], bool: [] },
   validate: { value: [], bool: [] },
-  next: { value: [], bool: [] },
+  next: { value: ['--session'], bool: [] },
+  heartbeat: { value: ['--session'], bool: [] },
+  run: { value: ['--session'], bool: [] },
   summary: { value: [], bool: [] },
 };
 
@@ -475,7 +565,10 @@ function riskFlag(v) {
 
 const HELP = `Usage: node queue.mjs validate | next | route <id> [--risk yes|no] | summary
        node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>] [--branch <name>] [--risk yes|no] [--notified] [--session <id>]
-       node queue.mjs usage --window <pct> --weekly <pct>`;
+       node queue.mjs usage --window <pct> --weekly <pct> [--session <id>]
+       node queue.mjs next [--session <id>]
+       node queue.mjs heartbeat --session <id>
+       node queue.mjs run <running|paused|stopped|finished> [--session <id>]`;
 
 function run(argv, cwd) {
   const args = parseArgs(argv);
@@ -494,7 +587,7 @@ function run(argv, cwd) {
       console.error(`queue: cannot read ${ctx.queueFile}: ${err.message}`);
       return 1;
     }
-    const failures = validateQueue({ text, config: ctx.config, repoRoot: ctx.root });
+    const failures = validateQueue({ text, config: ctx.config, repoRoot: ctx.specRoots });
     for (const f of failures) console.error(`${f.id}: ${f.rule}: ${f.message}`);
     if (failures.length) return 1;
     console.log(`queue ok: ${parseQueue(text).tasks.length} tasks`);
@@ -513,7 +606,7 @@ function run(argv, cwd) {
     const state = readState(ctx, tasks);
     const now = new Date().toISOString();
     state.run.usage.push({ at: now, window: pct(flags.window), weekly: pct(flags.weekly), decision });
-    state.run.heartbeat = { at: now, session: null };
+    state.run.heartbeat = { at: now, session: flags.session ?? previousSession(state) };
     state.run.unreadableReason =
       decision === 'unreadable' ? `usage unreadable at ${now}: window=${flags.window ?? 'missing'} weekly=${flags.weekly ?? 'missing'}` : null;
     writeState(ctx, state);
@@ -521,14 +614,46 @@ function run(argv, cwd) {
     return decision === 'unreadable' ? 3 : 0;
   }
 
+  if (cmd === 'heartbeat') {
+    if (!flags.session) throw new CliError('heartbeat needs --session <id>');
+    const stored = readStoredState(ctx);
+    if (heartbeatBlocks(stored, flags.session)) {
+      const writer = previousSession(stored);
+      console.error(`queue: a heartbeat under 15 minutes old was written by ${writer ? `session ${writer}` : 'an unknown session'}; another run is live`);
+      return 1;
+    }
+    return 0;
+  }
+
   const tasks = readQueueTasks(ctx);
   const state = readState(ctx, tasks);
+
+  if (cmd === 'run') {
+    const [to] = positional;
+    if (!to || positional.length > 1) throw new CliError('run needs <running|paused|stopped|finished>');
+    if (!RUN_STATUSES.includes(to)) throw new CliError(`unknown run status "${to}" (use ${RUN_STATUSES.join(', ')})`);
+    let next;
+    try {
+      next = applyRun(state, tasks, to, { session: flags.session });
+    } catch (err) {
+      throw new CliError(err.message, 1);
+    }
+    writeState(ctx, next);
+    console.log(`run: ${to}`);
+    return 0;
+  }
 
   if (cmd === 'next') {
     const result = nextTask({ tasks, state, config: ctx.config });
     let saved = state;
-    for (const d of result.deferred) saved = applySet(saved, tasks, d.id, 'deferred', { reason: d.reason, category: 'dependency' });
-    if (result.deferred.length) writeState(ctx, saved);
+    for (const d of result.deferred) {
+      saved = applySet(saved, tasks, d.id, 'deferred', { reason: d.reason, category: 'dependency', session: flags.session });
+    }
+    if (flags.session && !result.deferred.length) {
+      saved = structuredClone(saved);
+      saved.run.heartbeat = { at: new Date().toISOString(), session: flags.session };
+      writeState(ctx, saved);
+    } else if (result.deferred.length) writeState(ctx, saved);
     console.log(JSON.stringify(result, null, 2));
     return 0;
   }
