@@ -135,6 +135,10 @@ On exit 1 every line names a task and a rule: fix the queue file (or drop the ta
 why) and run it again. Planning does not finish while validate fails. If it cannot be made to pass
 in two attempts, stop and show the exact output.
 
+When validate passes, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" plan`. It archives any
+stored run state and starts a fresh plan identity, so a re-plan with identical tasks never inherits
+the old run. It exits 1 while a stored run is live: stop and show the message.
+
 ## 7. Offer to arm
 
 Show the queue in short form: id, title, tier, merge, dependsOn, the dropped tasks and the

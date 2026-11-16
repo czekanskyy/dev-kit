@@ -82,12 +82,29 @@ export function readMarker(file, { now = Date.now() } = {}) {
   }
 }
 
-/** Writes the marker atomically, creating its directory. */
+/**
+ * Writes the marker atomically, creating its directory. On Windows a rename over a file that another
+ * process has open fails with EPERM/EBUSY/EACCES (the guard reads the marker on every call), so the
+ * rename is retried briefly.
+ */
 export function writeMarker(file, marker) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`);
-  fs.renameSync(tmp, file);
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (err) {
+      const transient = err.code === 'EPERM' || err.code === 'EBUSY' || err.code === 'EACCES';
+      if (!transient || Date.now() > deadline) {
+        fs.rmSync(tmp, { force: true });
+        throw err;
+      }
+      sleep(15);
+    }
+  }
 }
 
 const LOCK_STALE_MS = 10 * 1000;

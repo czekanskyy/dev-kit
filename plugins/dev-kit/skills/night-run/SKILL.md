@@ -54,7 +54,9 @@ say so as the other skills do), report the reason and stop.
    no report, release nothing, and stop. Otherwise it has written this session's own heartbeat.
 4. `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" run running --session ${CLAUDE_SESSION_ID}`. A
    refusal (the run is stopped or finished) ends the session with that message. A paused run (armed
-   `--resumable`) continues here after the window reset.
+   `--resumable`) continues here after the window reset. Any later `set`, `usage`, `warn` or `run`
+   call with `--session` that exits 1 with "holds the run" means another session owns the run: stop,
+   write nothing, do not retry.
 5. The session working folder is the main checkout on the integration branch. Never edit there:
    every task gets its own worktree (step 5).
 
