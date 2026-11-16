@@ -7,7 +7,7 @@
 //   node queue.mjs next
 //   node queue.mjs route <id> [--risk yes|no]
 //   node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>]
-//                                    [--branch <name>] [--risk yes|no] [--notified]
+//                                    [--branch <name>] [--risk yes|no] [--notified] [--session <id>]
 //   node queue.mjs usage --window <pct> --weekly <pct>
 //   node queue.mjs summary
 // Exit codes: 0 ok, 1 validation or state failure, 2 bad usage or unreadable input,
@@ -15,14 +15,17 @@
 // The queue file (paths.queue) is only ever read here. Run state lives in night-state.json
 // next to it and carries no consent field.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './lib/config.mjs';
 import { isMain } from './lib/hook.mjs';
+import { commonGitDir } from './lib/night.mjs';
 
 export const TIERS = ['T0', 'T1', 'T2', 'T3'];
 export const STATUSES = ['pending', 'running', 'merged', 'open', 'waiting', 'deferred', 'interrupted'];
 export const STATE_FILE = 'night-state.json';
+export const HEARTBEAT_FRESH_MS = 15 * 60 * 1000;
 
 const DEFAULT_LIMITS = { lowerEffortAt: 75, warnAt: 90, stopAt: 95, nightWindowPauseAt: 90 };
 const KEYS = ['tier', 'spec', 'brief', 'specTier', 'decisions', 'dependsOn', 'merge', 'base', 'hotfix'];
@@ -85,6 +88,7 @@ export function parseQueue(text) {
         spec: f.spec ?? null,
         brief: f.brief ?? null,
         specTier: f.specTier ?? 'none',
+        specTierDeclared: f.specTier !== undefined && !isNone(f.specTier) ? f.specTier : null,
         decisions: f.decisions ?? 'none',
         dependsOn: isNone(dep)
           ? []
@@ -107,6 +111,52 @@ function specPath(value) {
   return clean(v).split('#')[0];
 }
 
+/** Reads the spec header line "Tier: T<n> ... Status: <words>". Returns { tier, status } (null when absent). */
+export function parseSpecHeader(body) {
+  for (const line of String(body ?? '').replace(/^﻿/, '').split(/\r?\n/)) {
+    const m = /^\s*(?:[-*>]\s+)?(?:\*\*)?Tier:\s*(T[0-3])\b/i.exec(line);
+    if (!m) continue;
+    const st = /Status:\s*(?:\*\*)?\s*([A-Za-z]+(?: [A-Za-z]+)?)/i.exec(line);
+    return { tier: m[1].toUpperCase(), status: st ? st[1].toLowerCase() : null };
+  }
+  return { tier: null, status: null };
+}
+
+function statusAccepted(status) {
+  return status !== null && (/^accepted\b/.test(status) || /^in progress\b/.test(status));
+}
+
+function specsDir(config, repoRoot) {
+  return path.resolve(repoRoot, config.paths?.specs ?? 'specs/');
+}
+
+function insideDir(dir, abs) {
+  const rel = path.relative(dir, abs);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function readSpec(task, config, repoRoot) {
+  const rel = specPath(task.spec);
+  const abs = path.resolve(repoRoot, rel);
+  if (!rel || !insideDir(specsDir(config, repoRoot), abs)) return { rel, outside: true, body: null };
+  try {
+    if (fs.statSync(abs).isFile()) return { rel, outside: false, body: fs.readFileSync(abs, 'utf8') };
+  } catch {
+    // missing or unreadable
+  }
+  return { rel, outside: false, body: null };
+}
+
+/** Returns the tasks with specTier taken from the linked spec header when there is one. */
+export function withSpecTiers(tasks, config = {}, repoRoot = process.cwd()) {
+  return tasks.map((t) => {
+    if (!t.spec) return t;
+    const { body } = readSpec(t, config, repoRoot);
+    const tier = body === null ? null : parseSpecHeader(body).tier;
+    return tier ? { ...t, specTier: tier } : t;
+  });
+}
+
 /**
  * Checks the queue against the rules of the night-mode spec. Returns [{ id, rule, message }].
  * opts: { text, config, repoRoot }
@@ -127,17 +177,15 @@ export function validateQueue({ text, config = {}, repoRoot = process.cwd() }) {
     const needsSpec = t.tier === 'T2' || t.tier === 'T3';
     if (needsSpec && !t.spec) fail(t.id, 'spec-required', `${t.tier} needs a spec link`);
     if (t.spec) {
-      const rel = specPath(t.spec);
-      const abs = path.resolve(repoRoot, rel);
-      let body = null;
-      try {
-        if (rel && fs.statSync(abs).isFile()) body = fs.readFileSync(abs, 'utf8');
-      } catch {
-        // missing or unreadable
-      }
-      if (body === null) fail(t.id, 'spec-missing', `spec file not found: ${rel || t.spec}`);
+      const { rel, outside, body } = readSpec(t, config, repoRoot);
+      if (outside) fail(t.id, 'spec-outside-specs', `spec path "${rel || t.spec}" is not inside ${config.paths?.specs ?? 'specs/'}`);
+      else if (body === null) fail(t.id, 'spec-missing', `spec file not found: ${rel || t.spec}`);
       else {
-        if (!/Status:\s*accepted/i.test(body)) fail(t.id, 'spec-not-accepted', `${rel} is not marked "Status: accepted"`);
+        const head = parseSpecHeader(body);
+        if (!statusAccepted(head.status)) fail(t.id, 'spec-not-accepted', `${rel} header is not marked "Status: accepted" or "in progress"`);
+        if (t.specTierDeclared && t.specTierDeclared !== head.tier) {
+          fail(t.id, 'spec-tier-mismatch', `specTier "${t.specTierDeclared}" differs from the spec header tier "${head.tier ?? 'missing'}"`);
+        }
         if (body.split(/\r?\n/).some((l) => l.trimStart().startsWith('|') && /needs decision/i.test(l))) {
           fail(t.id, 'spec-needs-decision', `${rel} still holds a "Needs decision" row`);
         }
@@ -150,8 +198,8 @@ export function validateQueue({ text, config = {}, repoRoot = process.cwd() }) {
       else if (at >= index) fail(t.id, 'dependency-later', `depends on "${d}", which does not come earlier in the queue`);
     }
     if (t.hotfix !== null && !/^(no|false|none|)$/i.test(t.hotfix)) fail(t.id, 'hotfix', 'hotfix tasks are not allowed in a night queue');
-    if (t.base !== null && integration && t.base !== integration) {
-      fail(t.id, 'base-not-integration', `base "${t.base}" is not the integration branch "${integration}"`);
+    if (t.base !== null && t.base !== integration) {
+      fail(t.id, 'base-not-integration', integration ? `base "${t.base}" is not the integration branch "${integration}"` : `base "${t.base}" given but branches.integration is not set`);
     }
   });
   return failures;
@@ -160,8 +208,31 @@ export function validateQueue({ text, config = {}, repoRoot = process.cwd() }) {
 // ---------------------------------------------------------------------------
 // State
 
-export function emptyState(tasks) {
-  return syncState({ version: 1, run: { status: 'running', heartbeat: null, usage: [], unreadableReason: null }, tasks: {} }, tasks);
+export function emptyState(tasks, queueHash = null) {
+  return syncState({ version: 1, queueHash, run: { status: 'running', heartbeat: null, usage: [], unreadableReason: null }, tasks: {} }, tasks);
+}
+
+export function hashQueue(text) {
+  return crypto.createHash('sha256').update(String(text ?? '')).digest('hex');
+}
+
+/** Keeps a stored state only when it belongs to this queue (same hash); otherwise starts fresh. */
+export function stateForQueue(stored, tasks, queueHash) {
+  if (!stored || typeof stored !== 'object' || (queueHash && stored.queueHash !== queueHash)) return emptyState(tasks, queueHash);
+  return syncState(stored, tasks);
+}
+
+/** True while a heartbeat under 15 minutes old was written by another (or an unknown) session. */
+export function heartbeatBlocks(state, sessionId, now = Date.now()) {
+  if (!sessionId) return false;
+  const hb = state?.run?.heartbeat;
+  if (!hb) return false;
+  const at = Date.parse(typeof hb === 'string' ? hb : hb.at);
+  if (!Number.isFinite(at)) return false;
+  const nowMs = typeof now === 'number' ? now : Date.parse(now instanceof Date ? now.toISOString() : now);
+  if (nowMs - at >= HEARTBEAT_FRESH_MS) return false;
+  const writer = typeof hb === 'string' ? null : (hb.session ?? null);
+  return writer !== sessionId;
 }
 
 /** Adds a pending entry for every queue task that has none. Mutates and returns the state. */
@@ -187,7 +258,7 @@ function syncState(state, tasks) {
 
 /**
  * Returns a new state with task `id` moved to `status`. Never touches the queue or any consent.
- * opts: { pr, reason, category, branch, risk (boolean), notified, now }
+ * opts: { pr, reason, category, branch, risk (boolean), notified, session, now }
  */
 export function applySet(state, tasks, id, status, opts = {}) {
   if (!STATUSES.includes(status)) throw new Error(`unknown status "${status}" (use ${STATUSES.join(', ')})`);
@@ -211,7 +282,7 @@ export function applySet(state, tasks, id, status, opts = {}) {
   if (status === 'running' && !entry.startedAt) entry.startedAt = now;
   if (['merged', 'open', 'waiting', 'deferred'].includes(status)) entry.finishedAt = now;
   entry.updatedAt = now;
-  next.run.heartbeat = now;
+  next.run.heartbeat = { at: now, session: opts.session ?? null };
   return next;
 }
 
@@ -319,10 +390,15 @@ export function summarize({ tasks, state, config }) {
 // ---------------------------------------------------------------------------
 // CLI
 
+function mainCheckout(cwd, fallback) {
+  const dir = commonGitDir(cwd);
+  return dir && path.basename(dir) === '.git' ? path.dirname(dir) : fallback;
+}
+
 function loadContext(cwd) {
   const config = loadConfig(cwd);
   const root = config.repoRoot;
-  const queueFile = path.resolve(root, config.paths?.queue ?? 'queue/night.md');
+  const queueFile = path.resolve(mainCheckout(cwd, root), config.paths?.queue ?? 'queue/night.md');
   const stateFile = path.join(path.dirname(queueFile), STATE_FILE);
   return { config, root, queueFile, stateFile };
 }
@@ -334,7 +410,8 @@ function readQueueTasks(ctx) {
   } catch (err) {
     throw new CliError(`cannot read the queue ${ctx.queueFile}: ${err.message}`, 2);
   }
-  return parseQueue(text).tasks;
+  ctx.queueHash = hashQueue(text);
+  return withSpecTiers(parseQueue(text).tasks, ctx.config, ctx.root);
 }
 
 function readState(ctx, tasks) {
@@ -342,10 +419,10 @@ function readState(ctx, tasks) {
   try {
     state = JSON.parse(fs.readFileSync(ctx.stateFile, 'utf8').replace(/^﻿/, ''));
   } catch (err) {
-    if (err.code === 'ENOENT') return emptyState(tasks);
+    if (err.code === 'ENOENT') return emptyState(tasks, ctx.queueHash ?? null);
     throw new CliError(`cannot read ${ctx.stateFile}: ${err.message}`, 2);
   }
-  return syncState(state, tasks);
+  return stateForQueue(state, tasks, ctx.queueHash ?? null);
 }
 
 function writeState(ctx, state) {
@@ -363,7 +440,7 @@ class CliError extends Error {
 }
 
 const FLAGS = {
-  set: { value: ['--pr', '--reason', '--category', '--branch', '--risk'], bool: ['--notified'] },
+  set: { value: ['--pr', '--reason', '--category', '--branch', '--risk', '--session'], bool: ['--notified'] },
   usage: { value: ['--window', '--weekly'], bool: [] },
   route: { value: ['--risk'], bool: [] },
   validate: { value: [], bool: [] },
@@ -397,7 +474,7 @@ function riskFlag(v) {
 }
 
 const HELP = `Usage: node queue.mjs validate | next | route <id> [--risk yes|no] | summary
-       node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>] [--branch <name>] [--risk yes|no] [--notified]
+       node queue.mjs set <id> <status> [--pr <url>] [--reason <text>] [--category <name>] [--branch <name>] [--risk yes|no] [--notified] [--session <id>]
        node queue.mjs usage --window <pct> --weekly <pct>`;
 
 function run(argv, cwd) {
@@ -436,7 +513,7 @@ function run(argv, cwd) {
     const state = readState(ctx, tasks);
     const now = new Date().toISOString();
     state.run.usage.push({ at: now, window: pct(flags.window), weekly: pct(flags.weekly), decision });
-    state.run.heartbeat = now;
+    state.run.heartbeat = { at: now, session: null };
     state.run.unreadableReason =
       decision === 'unreadable' ? `usage unreadable at ${now}: window=${flags.window ?? 'missing'} weekly=${flags.weekly ?? 'missing'}` : null;
     writeState(ctx, state);
@@ -478,6 +555,7 @@ function run(argv, cwd) {
         branch: flags.branch,
         risk: riskFlag(flags.risk),
         notified: flags.notified === true,
+        session: flags.session,
       });
     } catch (err) {
       throw new CliError(err.message, 1);
