@@ -883,3 +883,76 @@ describe('F13 warn flag', () => {
     assert.equal(JSON.parse(runCli(cliRepo(), 'summary').stdout).warned, false);
   });
 });
+
+describe('R5 ownership, recovery, terminal runs, plan identity', () => {
+  test('a late run finished by the old session is refused while another live session holds the run', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 'A').status, 0);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'heartbeat', '--session', 'B').status, 0);
+    assert.equal(runCli(root, 'run', 'running', '--session', 'B').status, 0);
+    for (const to of ['finished', 'stopped', 'paused']) {
+      const r = runCli(root, 'run', to, '--session', 'A');
+      assert.equal(r.status, 1, to);
+      assert.match(r.stderr, /session B/);
+    }
+    assert.equal(runCli(root, 'set', 'a', 'open', '--pr', 'u', '--session', 'A').status, 1);
+    assert.equal(runCli(root, 'warn', '--session', 'A').status, 1);
+    assert.equal(runCli(root, 'usage', '--window', '1', '--weekly', '1', '--session', 'A').status, 1);
+    const st = readState(root);
+    assert.equal(st.run.status, 'running');
+    assert.equal(st.run.heartbeat.session, 'B');
+    assert.equal(runCli(root, 'run', 'finished', '--session', 'B').status, 0);
+  });
+  test('mutations without --session and with a stale holder still work', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--session', 'A');
+    assert.equal(runCli(root, 'warn').status, 0);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'run', 'paused', '--session', 'B').status, 0);
+  });
+  test('crash and resume: the dead session task is interrupted and offered to the replacement', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--branch', 'night/a', '--session', 'A');
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'heartbeat', '--session', 'B').status, 0);
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+    assert.equal(runCli(root, 'run', 'running', '--session', 'B').status, 0);
+    const r = JSON.parse(runCli(root, 'next', '--session', 'B').stdout);
+    assert.equal(r.task.id, 'a');
+    assert.equal(readState(root).tasks.a.branch, 'night/a');
+  });
+  test('crash and resume through usage also interrupts the dead running task', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running', '--session', 'A');
+    ageHeartbeat(root);
+    runCli(root, 'usage', '--window', '1', '--weekly', '1', '--session', 'B');
+    assert.equal(readState(root).tasks.a.status, 'interrupted');
+  });
+  test('a finished or stopped run does not block a heartbeat by another session', () => {
+    for (const to of ['finished', 'stopped']) {
+      const root = cliRepo();
+      runCli(root, 'run', to, '--session', 'A');
+      assert.equal(runCli(root, 'heartbeat', '--session', 'B').status, 0, to);
+      assert.equal(readState(root).run.heartbeat.session, 'B');
+    }
+  });
+  test('plan: a fresh plan after a finished run starts fresh; a live run refuses it', () => {
+    const root = cliRepo();
+    runCli(root, 'run', 'running', '--session', 'A');
+    const live = runCli(root, 'plan');
+    assert.equal(live.status, 1);
+    assert.match(live.stderr, /live|heartbeat/);
+    runCli(root, 'run', 'finished', '--session', 'A');
+    assert.equal(runCli(root, 'run', 'running', '--session', 'B').status, 1);
+    const p = runCli(root, 'plan');
+    assert.equal(p.status, 0, p.stderr);
+    assert.equal(runCli(root, 'run', 'running', '--session', 'B').status, 0);
+    assert.equal(readState(root).run.status, 'running');
+    assert.ok(readState(root).planId);
+    assert.ok(fs.readdirSync(path.join(root, 'queue')).some((f) => /^night-state\..+\.json$/.test(f)));
+  });
+  test('plan with no stored state is a no-op that succeeds', () => {
+    assert.equal(runCli(cliRepo(), 'plan').status, 0);
+  });
+});

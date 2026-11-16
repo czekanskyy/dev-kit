@@ -13,7 +13,10 @@
 //   node queue.mjs busy                          (JSON {busy, reason}; exit 1 while a run is live or unreported)
 //   node queue.mjs warn [--session <id>]         (JSON {already}; sets the run-level warned flag)
 //   node queue.mjs run <running|paused|stopped|finished> [--session <id>]
+//   node queue.mjs plan                          (call after rewriting the queue: archives a finished, stopped or stale
+//                                                 run state and starts fresh with a new planId; exit 1 while a run is live)
 //   node queue.mjs summary
+// A mutation with --session (set, usage, warn, run) exits 1 while another session holds a live heartbeat.
 // Exit codes: 0 ok, 1 validation or state failure, 2 bad usage or unreadable input,
 //             3 usage reading unreadable (prints "unreadable"; start no new task).
 // The queue file (paths.queue) is only ever read here. Run state lives in night-state.json
@@ -346,6 +349,8 @@ export function stateForQueue(stored, tasks, queueHash) {
 /** True while a heartbeat under 15 minutes old was written by another (or an unknown) session. */
 export function heartbeatBlocks(state, sessionId, now = Date.now()) {
   if (!sessionId) return false;
+  // A finished or stopped run is over: nobody holds it, so it never blocks a new claim.
+  if (state?.run?.status === 'stopped' || state?.run?.status === 'finished') return false;
   const hb = state?.run?.heartbeat;
   if (!hb) return false;
   const at = Date.parse(typeof hb === 'string' ? hb : hb.at);
@@ -665,6 +670,7 @@ const FLAGS = {
   summary: { value: [], bool: [] },
   busy: { value: [], bool: [] },
   warn: { value: ['--session'], bool: [] },
+  plan: { value: [], bool: [] },
 };
 
 function parseArgs(argv) {
@@ -699,7 +705,8 @@ const HELP = `Usage: node queue.mjs validate | next | route <id> [--risk yes|no]
        node queue.mjs heartbeat --session <id>
        node queue.mjs run <running|paused|stopped|finished> [--session <id>]
        node queue.mjs busy
-       node queue.mjs warn [--session <id>]`;
+       node queue.mjs warn [--session <id>]
+       node queue.mjs plan`;
 
 function run(argv, cwd) {
   const args = parseArgs(argv);
@@ -751,7 +758,54 @@ function run(argv, cwd) {
   return withLock(ctx, () => writeCommand(ctx, cmd, positional, flags));
 }
 
+/** Refuses a --session mutation while another live session holds the heartbeat (a stale or absent one may be taken over). */
+function requireOwnership(stored, session) {
+  if (!session || !heartbeatBlocks(stored, session)) return;
+  const writer = previousSession(stored);
+  throw new CliError(
+    `${writer ? `session ${writer}` : 'an unknown session'} holds the run (heartbeat under 15 minutes old); session ${session} may not change it`,
+    1,
+  );
+}
+
+/**
+ * A session taking over from a different (or unknown) writer abandons that writer's running tasks
+ * BEFORE its own write refreshes the heartbeat; afterwards the old task would look alive.
+ */
+function takeover(state, session) {
+  if (!session || previousSession(state) === session) return state;
+  return abandonStale(state).state;
+}
+
 function writeCommand(ctx, cmd, positional, flags) {
+  if (['usage', 'warn', 'run', 'set'].includes(cmd)) requireOwnership(readStoredState(ctx), flags.session);
+
+  if (cmd === 'plan') {
+    // Plan identity contract: the planning step calls `plan` right after it rewrites the queue file.
+    // A stored state of a terminal or stale run is archived and dropped so the new plan starts fresh,
+    // even when the tasks and usage hash identically to the previous plan. A live run refuses it.
+    // Without this call the old rule holds: the state is kept while the queue hash is unchanged.
+    const stored = readStoredState(ctx);
+    if (stored === null) return 0;
+    const why = resetBlocker(stored);
+    if (why) throw new CliError(`cannot start a new plan: the stored run is live (${why})`, 1);
+    const stem = path.join(path.dirname(ctx.stateFile), `night-state.${String(stored.queueHash ?? 'nohash').slice(0, 8)}`);
+    let archive = `${stem}.json`;
+    for (let n = 1; fs.existsSync(archive); n++) archive = `${stem}-${n}.json`;
+    fs.copyFileSync(ctx.stateFile, archive);
+    let tasks = [];
+    try {
+      tasks = readQueueTasks(ctx);
+    } catch {
+      // a reset does not need a readable queue
+    }
+    const fresh = emptyState(tasks, ctx.queueHash ?? null);
+    fresh.planId = crypto.randomUUID();
+    writeState(ctx, fresh);
+    console.log(`plan: ${fresh.planId}`);
+    return 0;
+  }
+
   if (cmd === 'usage') {
     const reading = { window: flags.window, weekly: flags.weekly };
     const decision = decideUsage(reading, ctx.config.limits);
@@ -761,7 +815,7 @@ function writeCommand(ctx, cmd, positional, flags) {
     } catch {
       // usage can be recorded without a readable queue
     }
-    const state = readState(ctx, tasks);
+    const state = takeover(readState(ctx, tasks), flags.session);
     const now = new Date().toISOString();
     state.run.usage.push({ at: now, window: pct(flags.window), weekly: pct(flags.weekly), decision });
     state.run.heartbeat = { at: now, session: flags.session ?? previousSession(state) };
@@ -791,6 +845,7 @@ function writeCommand(ctx, cmd, positional, flags) {
       state = emptyState(tasks, ctx.queueHash ?? null);
     }
     state.run ??= { status: 'running', heartbeat: null, usage: [], unreadableReason: null };
+    state = takeover(state, flags.session);
     state.run.heartbeat = { at: new Date().toISOString(), session: flags.session };
     writeState(ctx, state);
     return 0;
@@ -848,7 +903,7 @@ function writeCommand(ctx, cmd, positional, flags) {
     return 0;
   }
 
-  const state = readState(ctx, tasks);
+  const state = cmd === 'set' ? takeover(readState(ctx, tasks), flags.session) : readState(ctx, tasks);
 
   if (cmd === 'next') {
     const abandoned = abandonStale(state);
