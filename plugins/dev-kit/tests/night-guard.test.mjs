@@ -550,3 +550,49 @@ describe('hook entry points', () => {
     assert.equal(spawn('guard-bash.mjs', bash(root, 'sx')).permissionDecision, 'deny');
   });
 });
+
+describe('.agent-scope is protected for night sessions (review finding)', () => {
+  function scopeSetup(text = 'slot\nrun: run-1\n') {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker([]));
+    const wt = makeWorktree(root, 'slot');
+    fs.writeFileSync(path.join(wt, '.agent-scope'), text);
+    return { root, file, wt, config: { ...config, repoRoot: wt } };
+  }
+  function fileV(wt, config, tool, p, sid = 'other') {
+    const v = evaluateFileTool({ tool_name: tool, tool_input: { file_path: p }, cwd: wt, session_id: sid }, { config, exec: mockExec(), env: {}, now: NOW });
+    return v ? v.decision : 'allow';
+  }
+  function bashV(wt, config, command, sid = 'other') {
+    const v = runHook({ tool_name: 'Bash', tool_input: { command }, cwd: wt, session_id: sid }, { config, exec: mockExec(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {}, now: NOW });
+    return v ? v.decision : 'allow';
+  }
+
+  test('Edit and Write of .agent-scope are denied when the file carries a run: line', () => {
+    const { wt, config } = scopeSetup();
+    for (const tool of ['Edit', 'Write']) {
+      assert.equal(fileV(wt, config, tool, '.agent-scope'), 'deny', tool);
+      assert.equal(fileV(wt, config, tool, path.join(wt, '.agent-scope')), 'deny');
+      assert.equal(fileV(wt, config, tool, '.AGENT-SCOPE.'), 'deny');
+    }
+  });
+  test('a registered night session is denied too, even without a run: line', () => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    assert.equal(fileV(root, { ...config, repoRoot: root }, 'Write', '.agent-scope', 's1'), 'deny');
+  });
+  test('a plain daytime scope file stays editable', () => {
+    const { wt, config } = scopeSetup('slot-1\n');
+    assert.equal(fileV(wt, config, 'Write', '.agent-scope'), 'allow');
+    assert.equal(fileV(wt, config, 'Write', 'src/a.ts'), 'allow');
+  });
+  test('shell writes of .agent-scope are denied, reads are not', () => {
+    const { wt, config } = scopeSetup();
+    for (const c of ['echo slot > .agent-scope', 'echo x >> ./.agent-scope', 'sed -i /run/d .agent-scope', 'rm .agent-scope', 'tee .agent-scope', 'cp x .agent-scope', 'printf a | tee -a .agent-scope', 'node -e "fs.writeFileSync(\'.agent-scope\',\'\')"']) {
+      assert.equal(bashV(wt, config, c), 'deny', c);
+    }
+    for (const c of ['cat .agent-scope', 'grep run .agent-scope', 'echo hi > out.txt']) {
+      assert.equal(bashV(wt, config, c), 'allow', c);
+    }
+  });
+});

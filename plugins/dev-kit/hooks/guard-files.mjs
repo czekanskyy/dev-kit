@@ -53,6 +53,45 @@ function regenerateHint(config) {
   return "the project's generator command";
 }
 
+const SCOPE_NAME = /^\.agent-scope[. ]*(:.*)?$/i;
+
+/** True when a path argument names a `.agent-scope` file (trailing dots/spaces and streams ignored, simple globs too). */
+export function namesAgentScope(arg, cwd) {
+  const s = String(arg ?? '');
+  if (!s) return false;
+  const last = normalizePath(s).split('/').pop() ?? '';
+  if (SCOPE_NAME.test(last)) return true;
+  if (/[*?[]/.test(last)) {
+    try {
+      const dir = path.dirname(toAbsolute(s, cwd || process.cwd()));
+      return globMatch(s, toAbsolute('.agent-scope', dir), { root: cwd || dir });
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the session's own scope file must stay as it is: the session is a registered night
+ * session, or its worktree's `.agent-scope` carries a `run:` line. The file is read once.
+ */
+export function scopeProtected(input, { now } = {}) {
+  try {
+    const nightOpts = now === undefined ? {} : { now };
+    if (isNightSession(input, nightOpts)) return true;
+    const root = findRepoRoot(path.resolve(input?.cwd || process.cwd()));
+    if (!root) return false;
+    const text = fs.readFileSync(path.join(root, '.agent-scope'), 'utf8');
+    return /^[ \t]*run:/m.test(text);
+  } catch {
+    return false;
+  }
+}
+
+export const SCOPE_DENY_REASON =
+  'Night mode: .agent-scope ties this worktree to the night run and is not edited, deleted or overwritten by a run. Leave it as it is and note the task in the run report.';
+
 /** Night mode: a night session may not write the queue or the marker. Returns a deny verdict or null. */
 function nightWriteDeny(input, abs, target, { config, root, now }) {
   const nightOpts = now === undefined ? {} : { now };
@@ -152,6 +191,10 @@ export function evaluateFileTool(input, opts = {}) {
         break;
       }
     }
+  }
+
+  if (namesAgentScope(target, cwd) && scopeProtected(input, { now: opts.now })) {
+    out.push({ decision: 'deny', reason: SCOPE_DENY_REASON });
   }
 
   try {
