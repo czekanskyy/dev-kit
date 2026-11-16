@@ -135,12 +135,26 @@ function pidAlive(pid) {
  * (crash between create and write) and is older than lockStaleMs(), or when it is older than
  * LOCK_HARD_STALE_MS. A live owner is never preempted earlier, so a slow critical section cannot lose its lock.
  */
-function lockIsStale(lock, text) {
-  const age = Date.now() - fs.statSync(lock).mtimeMs;
+// A lock must be at least this old before a dead owner pid makes it stale. A lock that was released and
+// retaken between our read and our judgement is young, so a fresh lock is never mistaken for a dead one.
+const DEAD_OWNER_MIN_AGE_MS = 250;
+
+function lockIsStale(age, text) {
   if (age > LOCK_HARD_STALE_MS) return true;
   const pid = Number.parseInt(text, 10);
-  if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+  if (Number.isInteger(pid) && pid > 0) return age > DEAD_OWNER_MIN_AGE_MS && !pidAlive(pid);
   return age > lockStaleMs();
+}
+
+/** Reads the lock text and its age from one open descriptor, so both describe the same file. */
+function readLock(lock) {
+  const fd = fs.openSync(lock, 'r');
+  try {
+    const age = Date.now() - fs.fstatSync(fd).mtimeMs;
+    return { text: fs.readFileSync(fd, 'utf8'), age };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
@@ -148,8 +162,8 @@ function lockIsStale(lock, text) {
  * between our check and the removal, so move it aside first and put it back if it is not the one we judged.
  */
 function breakStale(lock) {
-  const text = fs.readFileSync(lock, 'utf8');
-  if (!lockIsStale(lock, text)) return;
+  const { text, age } = readLock(lock);
+  if (!lockIsStale(age, text)) return;
   const aside = `${lock}.stale.${process.pid}`;
   fs.renameSync(lock, aside);
   try {
