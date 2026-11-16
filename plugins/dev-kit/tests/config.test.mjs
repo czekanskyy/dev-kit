@@ -126,6 +126,23 @@ describe('validator and CLI', () => {
     assert.ok(problems.some((p) => p.includes('extra: unknown key')));
     assert.ok(problems.some((p) => p.includes('gate.steps[0]')));
   });
+  test('night: accepts a full block', () => {
+    const night = { merge: 'lowRisk', rules: 'docs/night.md', maxRunHours: 8 };
+    assert.deepEqual(validateProject({ ...PROJECT, night }), []);
+  });
+  test('night: a config without the key validates and gets the defaults', () => {
+    assert.deepEqual(validateProject(PROJECT), []);
+    assert.equal(PROJECT.night, undefined);
+    const merged = mergeConfig(readJson(DEFAULTS_FILE), PROJECT);
+    assert.equal(merged.night.merge, 'none');
+    assert.equal(merged.night.maxRunHours, 12);
+    assert.equal(merged.night.rules, undefined);
+  });
+  test('night: rejects an unknown subkey, merge "all" and maxRunHours 0', () => {
+    assert.ok(validateProject({ ...PROJECT, night: { extra: 1 } }).some((p) => p.includes('night.extra: unknown key')));
+    assert.ok(validateProject({ ...PROJECT, night: { merge: 'all' } }).some((p) => p.includes('night.merge')));
+    assert.ok(validateProject({ ...PROJECT, night: { maxRunHours: 0 } }).some((p) => p.includes('night.maxRunHours')));
+  });
   test('CLI exits 3 without a project file and still prints defaults', () => {
     const root = fakeRepo();
     const r = spawnSync(process.execPath, [path.join(SCRIPTS, 'config.mjs')], { cwd: root, encoding: 'utf8' });

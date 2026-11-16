@@ -67,5 +67,6 @@
     "reports": "reports/",
     "handoff": "queue/handoff.md"
   },
+  "night": { "merge": "none", "maxRunHours": 12 },
   "notify": { "ntfy": { "topicEnv": "NTFY_TOPIC", "tokenEnv": "NTFY_TOKEN" } }
 }
