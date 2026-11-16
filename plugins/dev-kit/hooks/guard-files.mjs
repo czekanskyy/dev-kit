@@ -53,7 +53,8 @@ function regenerateHint(config) {
   return "the project's generator command";
 }
 
-const SCOPE_NAME = /^\.agent-scope[. ]*(:.*)?$/i;
+const SCOPE_NAME = /^(?:[a-z]:)?\.agent-scope[. ]*(:.*)?$/i;
+const DRIVE_RELATIVE = /^[a-z]:(?![\\/])/i;
 
 /** True when a path argument names a `.agent-scope` file (trailing dots/spaces and streams ignored, simple globs too). */
 export function namesAgentScope(arg, cwd) {
@@ -73,19 +74,34 @@ export function namesAgentScope(arg, cwd) {
 }
 
 /**
- * True when the session's own scope file must stay as it is: the session is a registered night
- * session, or its worktree's `.agent-scope` carries a `run:` line. The file is read once.
+ * The root of the session's own working tree when its `.agent-scope` already carries a `run:` line
+ * (that file must stay as it is), else null. Only the own file is protected: a registered
+ * orchestrator creates scope files in other worktrees, and creating one where none exists is fine.
  */
-export function scopeProtected(input, { now } = {}) {
+export function protectedScopeRoot(input) {
   try {
-    const nightOpts = now === undefined ? {} : { now };
-    if (isNightSession(input, nightOpts)) return true;
     const root = findRepoRoot(path.resolve(input?.cwd || process.cwd()));
-    if (!root) return false;
+    if (!root) return null;
     const text = fs.readFileSync(path.join(root, '.agent-scope'), 'utf8');
-    return /^[ \t]*run:/m.test(text);
+    return /^[ \t]*run:/m.test(text) ? root : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+export function scopeProtected(input) {
+  return protectedScopeRoot(input) !== null;
+}
+
+/** True when `arg` names the `.agent-scope` at `scopeRoot` (the session's own), resolved against `cwd`. */
+export function namesOwnAgentScope(arg, cwd, scopeRoot) {
+  if (!scopeRoot || !namesAgentScope(arg, cwd)) return false;
+  try {
+    const s = String(arg).replace(DRIVE_RELATIVE, '');
+    const dir = path.dirname(toAbsolute(s, cwd || process.cwd()));
+    return samePath(dir, scopeRoot);
+  } catch {
+    return true;
   }
 }
 
@@ -193,7 +209,7 @@ export function evaluateFileTool(input, opts = {}) {
     }
   }
 
-  if (namesAgentScope(target, cwd) && scopeProtected(input, { now: opts.now })) {
+  if (namesOwnAgentScope(target, cwd, protectedScopeRoot(input))) {
     out.push({ decision: 'deny', reason: SCOPE_DENY_REASON });
   }
 
