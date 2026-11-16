@@ -75,7 +75,7 @@ export function readMarker(file, { now = Date.now() } = {}) {
   try {
     const m = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
     if (!isWellFormed(m)) return null;
-    if (now > toMs(m.expiry)) return null;
+    if (now > Math.min(toMs(m.expiry), toMs(m.end) + EXPIRY_GRACE_MS)) return null;
     return m;
   } catch {
     return null;
@@ -99,7 +99,7 @@ export function registerSession(file, sessionId, { now = Date.now() } = {}) {
   return true;
 }
 
-/** Fallback (subagents): the directory is in a linked worktree whose .agent-scope names the run id. */
+/** Fallback (subagents): the directory is in a linked worktree whose .agent-scope names the run id (a `run: <id>` line). */
 function worktreeNamesRun(cwd, runId) {
   const root = findRepoRoot(path.resolve(cwd));
   if (!root) return false;
@@ -107,7 +107,7 @@ function worktreeNamesRun(cwd, runId) {
     if (!fs.statSync(path.join(root, '.git')).isFile()) return false;
     const text = fs.readFileSync(path.join(root, '.agent-scope'), 'utf8');
     const esc = runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(^|[^A-Za-z0-9._-])${esc}($|[^A-Za-z0-9._-])`).test(text);
+    return new RegExp(`^[ \\t]*run:[ \\t]*${esc}[ \\t]*\\r?$`, 'm').test(text);
   } catch {
     return false;
   }
@@ -129,9 +129,26 @@ export function isNightSession(input, { now = Date.now(), markerFile } = {}) {
   }
 }
 
-/** Same path, ignoring slash style (and case on Windows). */
+/** Canonical form for comparing paths: no trailing dots, spaces or streams (win32), real parent, case folded. */
+function canonicalPath(p) {
+  let x = normalizePath(path.resolve(p));
+  const win = process.platform === 'win32';
+  if (win) {
+    // Windows ignores trailing dots and spaces in each component and treats `name:stream` as the file.
+    const drive = /^[a-zA-Z]:/.test(x) ? x.slice(0, 2) : '';
+    x = drive + x.slice(drive.length).replace(/:[^/]*(?=\/|$)/g, '').replace(/[. ]+(?=\/|$)/g, '');
+  }
+  const dir = path.posix.dirname(x);
+  const base = path.posix.basename(x);
+  try {
+    x = path.posix.join(normalizePath(fs.realpathSync.native(dir)), base);
+  } catch {
+    // Parent does not exist: compare the lexical path.
+  }
+  return win || process.platform === 'darwin' ? x.toLowerCase() : x;
+}
+
+/** Same path, ignoring slash style, trailing dots/spaces and streams (win32), symlinked parents, and case (win32, darwin). */
 export function samePath(a, b) {
-  const x = normalizePath(path.resolve(a));
-  const y = normalizePath(path.resolve(b));
-  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+  return canonicalPath(a) === canonicalPath(b);
 }

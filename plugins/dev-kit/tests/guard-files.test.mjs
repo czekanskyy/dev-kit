@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { evaluateFileTool } from '../hooks/guard-files.mjs';
+import { NIGHT_DENY_PREFIX, nightVerdict } from '../scripts/lib/hook.mjs';
+import { buildMarker, markerPath, writeMarker } from '../scripts/lib/night.mjs';
 import { configFor, fakeRepo, mockExec } from './helpers.mjs';
 
 const root = fakeRepo();
@@ -14,8 +16,31 @@ const exec = mockExec({
   'git cat-file -e origin/dev:src/migrations/001_init.ts': '',
 });
 
+// Second mode: the repo holds a valid night marker with a registered session. Every verdict is also
+// run through the night layer: ask becomes deny with the prefix, everything else is unchanged.
+const NIGHT_NOW = Date.now();
+writeMarker(markerPath(root), {
+  ...buildMarker({ runId: 'suite-run', start: NIGHT_NOW - 3600000, end: NIGHT_NOW + 4 * 3600000 }),
+  sessions: ['night-session'],
+});
+function assertNightMode(v) {
+  const night = nightVerdict(v, { cwd: root, session_id: 'night-session' });
+  const day = nightVerdict(v, { cwd: root, session_id: 'other-session' });
+  if (!v) {
+    assert.equal(night, null);
+    assert.equal(day, null);
+  } else if (v.decision === 'ask') {
+    assert.deepEqual(night, { decision: 'deny', reason: `${NIGHT_DENY_PREFIX}${v.reason}` });
+    assert.deepEqual(day, v);
+  } else {
+    assert.deepEqual(night, v);
+    assert.deepEqual(day, v);
+  }
+}
+
 function run(tool, input, opts = {}) {
   const v = evaluateFileTool({ tool_name: tool, tool_input: input, cwd: root }, { config, exec, env: {}, ...opts });
+  assertNightMode(v);
   return v ? v.decision : 'allow';
 }
 

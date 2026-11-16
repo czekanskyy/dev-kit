@@ -5,6 +5,8 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 import { evaluateBash, forbiddenText, runHook } from '../hooks/guard-bash.mjs';
 import { loadConfig } from '../scripts/lib/config.mjs';
+import { NIGHT_DENY_PREFIX, nightVerdict } from '../scripts/lib/hook.mjs';
+import { buildMarker, markerPath, writeMarker } from '../scripts/lib/night.mjs';
 import { PROJECT, configFor, exitError, fakeRepo, mockExec } from './helpers.mjs';
 
 const root = fakeRepo();
@@ -25,7 +27,30 @@ function check(command, opts = {}) {
     tmpDir: opts.tmpDir ?? FAKE_TMP,
     env: opts.env ?? {},
   });
+  assertNightMode(v);
   return v ? v.decision : 'allow';
+}
+
+// Second mode: the same repo holds a valid night marker with a registered session. Every verdict is
+// also run through the night layer: ask becomes deny with the prefix, everything else is unchanged.
+const NIGHT_NOW = Date.now();
+writeMarker(markerPath(root), {
+  ...buildMarker({ runId: 'suite-run', start: NIGHT_NOW - 3600000, end: NIGHT_NOW + 4 * 3600000 }),
+  sessions: ['night-session'],
+});
+function assertNightMode(v) {
+  const night = nightVerdict(v, { cwd: root, session_id: 'night-session' });
+  const day = nightVerdict(v, { cwd: root, session_id: 'other-session' });
+  if (!v) {
+    assert.equal(night, null);
+    assert.equal(day, null);
+  } else if (v.decision === 'ask') {
+    assert.deepEqual(night, { decision: 'deny', reason: `${NIGHT_DENY_PREFIX}${v.reason}` });
+    assert.deepEqual(day, v);
+  } else {
+    assert.deepEqual(night, v);
+    assert.deepEqual(day, v);
+  }
 }
 
 function cases(title, expected, list, opts) {
@@ -641,6 +666,7 @@ describe('without .claude/workflow.json', () => {
 describe('PowerShell tool', () => {
   const ps = (command, opts = {}) => {
     const v = runHook({ tool_name: 'PowerShell', tool_input: { command }, cwd: root }, { config, exec: mockExec(), branch: 'feature/x', tmpDir: FAKE_TMP, env: {}, ...opts });
+    assertNightMode(v);
     return v ? v.decision : 'allow';
   };
   for (const c of [

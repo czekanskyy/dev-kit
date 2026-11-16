@@ -33,8 +33,12 @@ export const NIGHT_DENY_PREFIX = 'Night mode: deferred, needs the developer: ';
  */
 export function nightVerdict(verdict, input, opts = {}) {
   if (!verdict || (verdict.decision !== 'deny' && verdict.decision !== 'ask')) return null;
-  if (verdict.decision === 'ask' && input && isNightSession(input, opts)) {
-    return { decision: 'deny', reason: `${NIGHT_DENY_PREFIX}${verdict.reason}` };
+  try {
+    if (verdict.decision === 'ask' && input && isNightSession(input, opts)) {
+      return { decision: 'deny', reason: `${NIGHT_DENY_PREFIX}${verdict.reason}` };
+    }
+  } catch {
+    // A failing night helper must not drop the verdict: it stays as it was (ask or deny).
   }
   return verdict;
 }

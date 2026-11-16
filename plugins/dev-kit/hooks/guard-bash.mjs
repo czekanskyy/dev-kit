@@ -1431,10 +1431,24 @@ export function runHook(input, opts = {}) {
   }
 }
 
+const NODE_VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '--env-file', '-e', '--eval', '-p', '--print']);
+
+/** Index of the script argument of a `node` argv, skipping node's own flags, or -1. */
+function nodeScriptIndex(argv) {
+  let i = 1;
+  while (i < argv.length && argv[i].startsWith('-')) {
+    if (argv[i] === '--') return i + 1 < argv.length ? i + 1 : -1;
+    i += NODE_VALUE_FLAGS.has(argv[i]) ? 2 : 1;
+  }
+  return i < argv.length ? i : -1;
+}
+
 /**
- * Night mode: a `node .../night-lock.mjs claim [--run <id>]` command registers its session in the
- * marker, so the guard treats it as a night session from then on. Returns true when registered.
- * Nothing happens without a valid marker, or when --run names another run.
+ * Night mode: a plain `node .../night-lock.mjs claim --run <id>` command registers its session in
+ * the marker, so the guard treats it as a night session from then on. Returns true when registered.
+ * Registration happens before the user answers, so it is narrow: the claim must be the first command
+ * of the line (not after `&&`, `||`, `;` or inside a conditional), `--run` must be present and equal
+ * to the marker's run id, and the run must have started.
  */
 export function registerClaim(input, opts = {}) {
   try {
@@ -1443,24 +1457,19 @@ export function registerClaim(input, opts = {}) {
     if (typeof sessionId !== 'string' || !sessionId) return false;
     const dialect = input.tool_name === 'PowerShell' ? 'powershell' : 'bash';
     const cmds = parseCommandLine(String(input.tool_input?.command ?? ''), { dialect });
-    const claim = cmds.find(
-      (c) =>
-        c.depth === 0 &&
-        c.argv.length >= 3 &&
-        baseName(c.argv[0]) === 'node' &&
-        baseName(c.argv[1]) === 'night-lock.mjs' &&
-        c.argv[2] === 'claim',
-    );
-    if (!claim) return false;
+    const claim = cmds[0];
+    if (!claim || claim.depth !== 0 || claim.wrappers.length || claim.fromXargs || baseName(claim.argv[0]) !== 'node') return false;
+    const si = nodeScriptIndex(claim.argv);
+    if (si === -1 || baseName(claim.argv[si]) !== 'night-lock.mjs' || claim.argv[si + 1] !== 'claim') return false;
+    const rest = claim.argv.slice(si + 2);
+    if (rest.some((a) => a === '--help' || a === '-h')) return false;
+    const i = rest.findIndex((a) => a === '--run' || a.startsWith('--run='));
+    if (i === -1) return false;
+    const id = rest[i].startsWith('--run=') ? rest[i].slice(6) : rest[i + 1];
     const file = markerPath(input.cwd || process.cwd());
     const marker = readMarker(file, opts);
-    if (!marker) return false;
-    const rest = claim.argv.slice(3);
-    const i = rest.findIndex((a) => a === '--run' || a.startsWith('--run='));
-    if (i !== -1) {
-      const id = rest[i].startsWith('--run=') ? rest[i].slice(6) : rest[i + 1];
-      if (id !== marker.runId) return false;
-    }
+    if (!marker || id !== marker.runId) return false;
+    if ((opts.now ?? Date.now()) < Date.parse(marker.start)) return false;
     return registerSession(file, sessionId, opts);
   } catch {
     return false;
