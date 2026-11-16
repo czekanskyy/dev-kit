@@ -90,13 +90,53 @@ export function writeMarker(file, marker) {
   fs.renameSync(tmp, file);
 }
 
+const LOCK_STALE_MS = 10 * 1000;
+const LOCK_WAIT_MS = 8 * 1000;
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Runs fn while holding an exclusive lock file next to the marker (create-exclusive, 10 s stale timeout,
+ * 8 s bounded wait). Not reentrant. Throws when the lock cannot be taken in time.
+ */
+export function withMarkerLock(file, fn) {
+  const lock = `${file}.lock`;
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lock, 'wx'));
+      break;
+    } catch (err) {
+      if (err.code !== 'EEXIST' && err.code !== 'EPERM' && err.code !== 'EACCES') throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { force: true });
+      } catch {
+        // gone already, retry
+      }
+      if (Date.now() > deadline) throw new Error(`the night marker is locked (${lock}); try again`);
+      sleep(20);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+}
+
 /** Adds a session id to a valid marker. Returns true when it is registered afterwards. */
 export function registerSession(file, sessionId, { now = Date.now() } = {}) {
   if (typeof sessionId !== 'string' || !sessionId) return false;
-  const m = readMarker(file, { now });
-  if (!m) return false;
-  if (!m.sessions.includes(sessionId)) writeMarker(file, { ...m, sessions: [...m.sessions, sessionId] });
-  return true;
+  if (!readMarker(file, { now })) return false;
+  return withMarkerLock(file, () => {
+    const m = readMarker(file, { now });
+    if (!m) return false;
+    if (!m.sessions.includes(sessionId)) writeMarker(file, { ...m, sessions: [...m.sessions, sessionId] });
+    return true;
+  });
 }
 
 /** Fallback (subagents): the directory is in a linked worktree whose .agent-scope names the run id (a `run: <id>` line). */
