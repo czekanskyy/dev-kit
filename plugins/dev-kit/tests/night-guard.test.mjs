@@ -133,7 +133,7 @@ describe('isNightSession', () => {
   test('fallback does not apply to the main checkout', () => {
     const { root, file } = setup();
     writeMarker(file, validMarker([]));
-    fs.writeFileSync(path.join(root, '.agent-scope'), 'run-1\n');
+    fs.writeFileSync(path.join(root, '.agent-scope'), 'run: run-1\n');
     assert.equal(isNightSession({ session_id: 'x', cwd: root }, { now: NOW }), false);
   });
 });
@@ -439,6 +439,34 @@ describe('queue and marker path matching (review findings)', () => {
     }
     assert.equal(denied(root, config, path.join(link, 'night.md')), true);
     assert.equal(denied(root, config, path.join(link, 'other.md')), false);
+  });
+  test('a file symlink to the queue or the marker is the same file', (t) => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    fs.mkdirSync(path.join(root, 'queue'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'queue', 'night.md'), 'q\n');
+    const qLink = path.join(root, 'q-alias.md');
+    const mLink = path.join(root, 'm-alias.json');
+    try {
+      fs.symlinkSync(path.join(root, 'queue', 'night.md'), qLink, 'file');
+      fs.symlinkSync(file, mLink, 'file');
+    } catch (e) {
+      t.skip(`cannot create a file symlink here (${e.code})`);
+      return;
+    }
+    assert.equal(denied(root, config, qLink), true, 'queue link');
+    assert.equal(denied(root, config, mLink), true, 'marker link');
+  });
+  test('a Windows 8.3 short name of the marker file is the same file', { skip: win ? false : 'win32 only' }, (t) => {
+    const { root, file, config } = setup();
+    writeMarker(file, validMarker(['s1']));
+    const r = spawnSync('cmd.exe', ['/d', '/s', '/c', `"for %I in ("${file}") do @echo %~sI"`], { encoding: 'utf8', windowsVerbatimArguments: true });
+    const short = (r.stdout || '').trim();
+    if (!short || path.basename(short).toLowerCase() === path.basename(file).toLowerCase()) {
+      t.skip('8.3 short names are not enabled on this volume');
+      return;
+    }
+    assert.equal(denied(root, config, short), true);
   });
 });
 

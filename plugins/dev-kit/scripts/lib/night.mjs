@@ -138,12 +138,17 @@ function canonicalPath(p) {
     const drive = /^[a-zA-Z]:/.test(x) ? x.slice(0, 2) : '';
     x = drive + x.slice(drive.length).replace(/:[^/]*(?=\/|$)/g, '').replace(/[. ]+(?=\/|$)/g, '');
   }
-  const dir = path.posix.dirname(x);
-  const base = path.posix.basename(x);
   try {
-    x = path.posix.join(normalizePath(fs.realpathSync.native(dir)), base);
+    // Existing file: expands 8.3 short names and file symlinks.
+    x = normalizePath(fs.realpathSync.native(x));
   } catch {
-    // Parent does not exist: compare the lexical path.
+    const dir = path.posix.dirname(x);
+    const base = path.posix.basename(x);
+    try {
+      x = path.posix.join(normalizePath(fs.realpathSync.native(dir)), base);
+    } catch {
+      // Parent does not exist: compare the lexical path.
+    }
   }
   return win || process.platform === 'darwin' ? x.toLowerCase() : x;
 }
