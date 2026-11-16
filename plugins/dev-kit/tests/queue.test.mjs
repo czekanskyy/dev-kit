@@ -60,6 +60,29 @@ function runCli(root, ...args) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: root, encoding: 'utf8' });
 }
 
+function cliRepo(text = queueText(task('a')), cfg = PROJECT) {
+  const root = repoWith();
+  write(root, '.claude/workflow.json', JSON.stringify(cfg));
+  write(root, 'queue/night.md', text);
+  return root;
+}
+
+function ageHeartbeat(root, ms = 60 * 60 * 1000) {
+  const file = path.join(root, 'queue/night-state.json');
+  const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+  st.run.heartbeat.at = new Date(Date.now() - ms).toISOString();
+  fs.writeFileSync(file, JSON.stringify(st));
+}
+
+function linkedWorktree(root, cfg) {
+  const wt = path.join(root, 'wt', 'task-1');
+  fs.mkdirSync(wt, { recursive: true });
+  fs.mkdirSync(path.join(root, '.git', 'worktrees', 'task-1'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(root, '.git', 'worktrees', 'task-1')}\n`);
+  write(wt, '.claude/workflow.json', JSON.stringify(cfg));
+  return wt;
+}
+
 function readState(root) {
   return JSON.parse(fs.readFileSync(path.join(root, 'queue/night-state.json'), 'utf8'));
 }
@@ -408,6 +431,7 @@ describe('state belongs to one queue', () => {
     runCli(root, 'set', 'a', 'running');
     runCli(root, 'set', 'a', 'open', '--pr', 'https://example.test/pr/1');
     assert.equal(JSON.parse(runCli(root, 'summary').stdout).tasks[0].pr, 'https://example.test/pr/1');
+    ageHeartbeat(root);
     write(root, 'queue/night.md', queueText(task('a', 'brief: other night')));
     const out = runCli(root, 'summary').stdout;
     const s = JSON.parse(out);
@@ -442,6 +466,36 @@ describe('heartbeat', () => {
     const anon = applySet(emptyState(tasks), tasks, 'a', 'running', { now: AT });
     assert.equal(heartbeatBlocks(anon, 's1', at + 60000), true);
   });
+  test('a writer without --session keeps the previous heartbeat session', () => {
+    const next = applySet(state, tasks, 'a', 'waiting', { now: '2026-11-16T01:01:00.000Z' });
+    assert.deepEqual(next.run.heartbeat, { at: '2026-11-16T01:01:00.000Z', session: 's1' });
+  });
+  test('CLI sequence: set --session, usage and next without session, heartbeat check', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'set', 'a', 'running', '--session', 's1').status, 0);
+    assert.equal(runCli(root, 'usage', '--window', '10', '--weekly', '10').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 's1');
+    assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 0);
+    const other = runCli(root, 'heartbeat', '--session', 's2');
+    assert.equal(other.status, 1);
+    assert.match(other.stderr, /heartbeat/);
+  });
+  test('usage and next accept --session', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'usage', '--window', '10', '--weekly', '10', '--session', 's9').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 's9');
+    assert.equal(runCli(root, 'next', '--session', 's8').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, 's8');
+  });
+  test('heartbeat check: no heartbeat passes, unknown fresh writer blocks, stale heartbeat passes', () => {
+    const root = cliRepo();
+    assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 0);
+    assert.equal(runCli(root, 'set', 'a', 'running').status, 0);
+    assert.equal(readState(root).run.heartbeat.session, null);
+    assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 1);
+    ageHeartbeat(root);
+    assert.equal(runCli(root, 'heartbeat', '--session', 's1').status, 0);
+  });
   test('CLI set --session stores the session', () => {
     const root = repoWith();
     write(root, '.claude/workflow.json', JSON.stringify(PROJECT));
@@ -465,5 +519,136 @@ describe('files resolve against the main checkout', () => {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(readState(root).tasks.a.status, 'running');
     assert.ok(!fs.existsSync(path.join(wt, 'queue')));
+  });
+});
+
+describe('spec tier fails closed', () => {
+  const lowRisk = { ...PROJECT, night: { merge: 'lowRisk' } };
+  const specsCfg = { paths: { specs: 'specs/' } };
+  test('a missing spec at next time routes waiting under lowRisk', () => {
+    const root = cliRepo(queueText(task('a', 'spec: specs/gone.md#1\nspecTier: -')), lowRisk);
+    assert.equal(JSON.parse(runCli(root, 'next').stdout).route, 'waiting');
+    assert.equal(runCli(root, 'route', 'a', '--risk', 'no').stdout.trim(), 'waiting');
+    assert.equal(JSON.parse(runCli(root, 'summary').stdout).tasks[0].route, 'waiting');
+  });
+  test('a spec without a Tier header counts as T3', () => {
+    const root = cliRepo(queueText(task('a', 'spec: specs/nohead.md#1\nspecTier: -')), lowRisk);
+    write(root, 'specs/nohead.md', '# S\n\nStatus: accepted\n');
+    assert.equal(runCli(root, 'route', 'a', '--risk', 'no').stdout.trim(), 'waiting');
+  });
+  test('a declared T3 is not replaced by a lower header tier', () => {
+    const root = repoWith();
+    const [t] = withSpecTiers(parseQueue(queueText(task('a', 'spec: specs/ok.md#1\nspecTier: T3'))).tasks, specsCfg, root);
+    assert.equal(t.specTier, 'T3');
+  });
+  test('a higher header tier replaces a lower declared one', () => {
+    const root = repoWith({ t3: '# S\n\nTier: T3. Status: accepted\n' });
+    const [t] = withSpecTiers(parseQueue(queueText(task('a', 'spec: specs/t3.md#1\nspecTier: T1'))).tasks, specsCfg, root);
+    assert.equal(t.specTier, 'T3');
+  });
+  test('a call from a linked worktree finds a spec that exists only in the main checkout', () => {
+    const root = cliRepo(queueText(task('a', 'spec: specs/t3.md#1\nspecTier: -')), lowRisk);
+    write(root, 'specs/t3.md', '# S\n\nTier: T3. Status: accepted\n');
+    const wt = linkedWorktree(root, lowRisk);
+    assert.equal(runCli(wt, 'route', 'a', '--risk', 'no').stdout.trim(), 'waiting');
+  });
+  test('the main checkout spec is tried first and wins when readable', () => {
+    const root = cliRepo(queueText(task('a', 'spec: specs/s.md#1\nspecTier: -')), lowRisk);
+    write(root, 'specs/s.md', '# S\n\nTier: T2. Status: accepted\n');
+    const wt = linkedWorktree(root, lowRisk);
+    write(wt, 'specs/s.md', '# S\n\nTier: T3. Status: accepted\n');
+    assert.equal(JSON.parse(runCli(wt, 'summary').stdout).tasks[0].specTier, 'T2');
+  });
+});
+
+describe('state reset keeps live runs', () => {
+  const CHANGED = queueText(task('a', 'brief: really different'));
+  test('reformat-only edits keep the state', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u1');
+    ageHeartbeat(root);
+    const base = queueText(task('a'));
+    const variants = [`${base}\n\n`, `﻿${base}`, base.replace(/\n/g, '\r\n'), base.replace('2026-11-16', '2026-12-01')];
+    for (const v of variants) {
+      write(root, 'queue/night.md', v);
+      const out = runCli(root, 'summary');
+      assert.equal(out.status, 0, out.stderr);
+      assert.equal(JSON.parse(out.stdout).tasks[0].pr, 'u1');
+    }
+    assert.deepEqual(fs.readdirSync(path.join(root, 'queue')).filter((f) => /^night-state\..+\.json$/.test(f) && f !== 'night-state.json'), []);
+  });
+  test('a real change with a running task is refused', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    ageHeartbeat(root);
+    write(root, 'queue/night.md', CHANGED);
+    const r = runCli(root, 'summary');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /running/);
+    assert.equal(readState(root).tasks.a.status, 'running');
+  });
+  test('a real change with a fresh heartbeat is refused', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u');
+    write(root, 'queue/night.md', CHANGED);
+    const r = runCli(root, 'summary');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /heartbeat/);
+  });
+  test('a real change with no running task archives the old state and resets', () => {
+    const root = cliRepo();
+    runCli(root, 'set', 'a', 'running');
+    runCli(root, 'set', 'a', 'open', '--pr', 'u1');
+    ageHeartbeat(root);
+    const old = readState(root);
+    write(root, 'queue/night.md', CHANGED);
+    const r = runCli(root, 'summary');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).tasks[0].status, 'pending');
+    const archive = path.join(root, 'queue', `night-state.${old.queueHash.slice(0, 8)}.json`);
+    assert.ok(fs.existsSync(archive));
+    assert.deepEqual(JSON.parse(fs.readFileSync(archive, 'utf8')), old);
+  });
+});
+
+describe('run status', () => {
+  const status = (root) => JSON.parse(runCli(root, 'summary').stdout).run.status;
+  const go = (root, to, ...more) => runCli(root, 'run', to, ...more);
+  test('summary exposes the run status', () => {
+    assert.equal(JSON.parse(runCli(cliRepo(), 'summary').stdout).runStatus, 'running');
+  });
+  test('running to paused to running, and refreshes the heartbeat with the session', () => {
+    const root = cliRepo();
+    assert.equal(go(root, 'paused', '--session', 's1').status, 0);
+    assert.equal(status(root), 'paused');
+    assert.equal(readState(root).run.heartbeat.session, 's1');
+    assert.equal(go(root, 'running').status, 0);
+    assert.equal(status(root), 'running');
+    assert.equal(readState(root).run.heartbeat.session, 's1');
+  });
+  for (const [from, to] of [['running', 'stopped'], ['running', 'finished'], ['paused', 'stopped'], ['paused', 'finished']]) {
+    test(`${from} to ${to}`, () => {
+      const root = cliRepo();
+      if (from === 'paused') go(root, 'paused');
+      assert.equal(go(root, to).status, 0);
+      assert.equal(status(root), to);
+    });
+  }
+  for (const end of ['stopped', 'finished']) {
+    test(`${end} is terminal`, () => {
+      const root = cliRepo();
+      go(root, end);
+      for (const to of ['running', 'paused']) {
+        const r = go(root, to);
+        assert.equal(r.status, 1);
+        assert.match(r.stderr, /not allowed/);
+      }
+      assert.equal(status(root), end);
+    });
+  }
+  test('an unknown run status is a usage error', () => {
+    assert.equal(go(cliRepo(), 'bogus').status, 2);
   });
 });
