@@ -147,6 +147,32 @@ function sameRepo(dir, ctx) {
   return mine !== null && mine === commonGitDir(r, ctx);
 }
 
+/**
+ * Checked-out branch of dir when dir is a linked worktree, read from the filesystem only, or null.
+ * Fails closed: null for anything that is not a plain, consistent linked worktree on a named branch.
+ */
+function linkedWorktreeBranch(dir) {
+  try {
+    const top = findRepoRoot(dir);
+    if (top === null) return null;
+    const wt = fs.realpathSync(top);
+    const dotGit = path.join(wt, '.git');
+    if (!fs.statSync(dotGit).isFile()) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf8'));
+    if (!m) return null;
+    const gitDir = fs.realpathSync(path.resolve(wt, m[1]));
+    // The git dir must be <common>/worktrees/<name> and point back at this worktree.
+    const common = fs.realpathSync(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim()));
+    if (path.basename(path.dirname(gitDir)) !== 'worktrees' || fs.realpathSync(path.dirname(path.dirname(gitDir))) !== common) return null;
+    const back = fs.realpathSync(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'gitdir'), 'utf8').trim()));
+    if (back.toLowerCase() !== fs.realpathSync(dotGit).toLowerCase()) return null;
+    const head = /^ref:\s*refs\/heads\/(\S+)$/.exec(fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim());
+    return head ? head[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Text checks
 
@@ -273,6 +299,15 @@ function evalGit(cmd, ctx, state, out) {
   const known = !otherDir && !state.branchUnknown && sameRepo(gitCwd, ctx);
   let current = null;
   if (known) current = state.branch !== undefined ? state.branch : ctx.branchAt(gitCwd);
+  // A commit in a linked worktree on a named, unprotected branch is as safe as one in this repo.
+  let worktreeKnown = false;
+  if (sub === 'commit' && !known && !otherDir && !state.branchUnknown) {
+    const b = linkedWorktreeBranch(gitCwd);
+    if (b !== null && !br.protected.has(b) && b !== br.integration && !/^etap\//.test(b)) {
+      worktreeKnown = true;
+      current = b;
+    }
+  }
   const isProt = (b) => b != null && br.protected.has(shortRef(b));
   const isInteg = (b) => b != null && br.integration != null && shortRef(b) === br.integration;
   const deny = (reason) => out.push({ decision: 'deny', reason });
@@ -290,7 +325,7 @@ function evalGit(cmd, ctx, state, out) {
   const branchDestructive =
     sub === 'branch' && args.some((a) => /^-[a-zA-Z]*[DdfMmCc]/.test(a) || ['--delete', '--force', '--move', '--copy'].includes(a));
   const checkoutForce = (sub === 'checkout' && args.some((a) => /^-[a-zA-Z]*B/.test(a))) || (sub === 'switch' && args.some((a) => /^-[a-zA-Z]*C/.test(a)));
-  if (!known && !abortLike && (STATE_CHANGING_GIT.has(sub) || branchDestructive || checkoutForce)) {
+  if (!known && !worktreeKnown && !abortLike && (STATE_CHANGING_GIT.has(sub) || branchDestructive || checkoutForce)) {
     ask(
       state.branchUnknown && !otherDir
         ? `git ${sub} runs after a switch to a previous branch (- or @{-N}) that could not be resolved, so the current branch is unknown. Confirm it is not protected.`

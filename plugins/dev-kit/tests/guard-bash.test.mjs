@@ -149,6 +149,52 @@ cases('ref-moving resets and unsafe pulls on protected branch denied', 'deny', [
   'git pull --ff-only --no-rebase',
 ], { branch: 'test' });
 cases('pull with --ff-only last allowed on protected branch', 'allow', ['git pull --no-ff --ff-only', 'git pull --ff --ff-only origin', 'git pull -q --ff-only'], { branch: 'test' });
+describe('commit in a linked worktree of another repository', () => {
+  // Real filesystem layout: <main>/.git/worktrees/<name> with a back pointer, and <wt>/.git as a file.
+  function linked(head, name = 'wt1') {
+    const main = fs.realpathSync(fakeRepo('devkit-lmain-'));
+    const wt = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devkit-lwt-')));
+    const gd = path.join(main, '.git', 'worktrees', name);
+    fs.mkdirSync(gd, { recursive: true });
+    fs.writeFileSync(path.join(gd, 'HEAD'), head);
+    fs.writeFileSync(path.join(gd, 'commondir'), '../..\n');
+    fs.writeFileSync(path.join(gd, 'gitdir'), `${path.join(wt, '.git')}\n`);
+    fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${gd}\n`);
+    return { main, wt: wt.split(path.sep).join('/'), gd };
+  }
+  const via = (wt) => [`git -C ${wt} commit -m "x"`, `cd ${wt} && git commit -m "x"`];
+  test('work branch is allowed', () => {
+    const { wt } = linked('ref: refs/heads/fix/guard\n');
+    for (const c of via(wt)) assert.equal(check(c), 'allow');
+  });
+  for (const b of ['main', 'test', 'dev', 'etap/3']) {
+    test(`protected branch ${b} still asks`, () => {
+      const { wt } = linked(`ref: refs/heads/${b}\n`);
+      for (const c of via(wt)) assert.equal(check(c), 'ask');
+    });
+  }
+  test('detached HEAD still asks', () => {
+    const { wt } = linked('0123456789abcdef0123456789abcdef01234567\n');
+    assert.equal(check(via(wt)[0]), 'ask');
+  });
+  test('broken back pointer still asks', () => {
+    const { wt, gd } = linked('ref: refs/heads/fix/guard\n');
+    fs.writeFileSync(path.join(gd, 'gitdir'), '/somewhere/else/.git\n');
+    assert.equal(check(via(wt)[0]), 'ask');
+  });
+  test('a plain other repo still asks', () => {
+    const o = fs.realpathSync(fakeRepo('devkit-plain-')).split(path.sep).join('/');
+    assert.equal(check(via(o)[0]), 'ask');
+  });
+  test('attribution in the message is still denied', () => {
+    const { wt } = linked('ref: refs/heads/fix/guard\n');
+    assert.equal(check(`git -C ${wt} commit -m "Co-Authored-By: Claude"`), 'deny');
+  });
+  test('push in the worktree still asks', () => {
+    const { wt } = linked('ref: refs/heads/fix/guard\n');
+    assert.equal(check(`git -C ${wt} push origin fix/guard`), 'ask');
+  });
+});
 describe('branch state in other directories', () => {
   const other = fakeRepo('devkit-other-');
   test('git -C into another repo asks for a commit', () => assert.equal(check(`git -C ${other.replace(/\\/g, '/')} commit -m "x"`), 'ask'));
