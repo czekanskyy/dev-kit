@@ -19,6 +19,8 @@ import {
   toAbsolute,
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
+import { SCOPE_DENY_REASON, namesOwnAgentScope, protectedScopeRoot } from './guard-files.mjs';
+import { MarkerLockError, markerPath, readMarker, registerSession } from '../scripts/lib/night.mjs';
 import { baseName, parseCommandLine, parseOpts } from '../scripts/lib/shell.mjs';
 import { analyzeRisk } from '../scripts/risk.mjs';
 
@@ -88,6 +90,7 @@ export function makeContext(opts = {}) {
     repoRoot: normalizePath(config.repoRoot ?? findRepoRoot(cwd) ?? cwd),
     tmpDir: normalizePath(opts.tmpDir ?? os.tmpdir()),
     homeDir: normalizePath(opts.homeDir ?? os.homedir()),
+    scopeProtected: opts.scopeProtected || null,
     pluginRoot: opts.pluginRoot ?? (opts.env ?? process.env).CLAUDE_PLUGIN_ROOT ?? null,
     branchOverride: opts.branch,
     /** Runs an external command inside the shared time budget. Throws BudgetExhausted when it is spent. */
@@ -144,6 +147,32 @@ function sameRepo(dir, ctx) {
   if (normalizePath(r).toLowerCase() === ctx.repoRoot.toLowerCase()) return true;
   const mine = commonGitDir(ctx.repoRoot, ctx);
   return mine !== null && mine === commonGitDir(r, ctx);
+}
+
+/**
+ * Checked-out branch of dir when dir is a linked worktree, read from the filesystem only, or null.
+ * Fails closed: null for anything that is not a plain, consistent linked worktree on a named branch.
+ */
+function linkedWorktreeBranch(dir) {
+  try {
+    const top = findRepoRoot(dir);
+    if (top === null) return null;
+    const wt = fs.realpathSync(top);
+    const dotGit = path.join(wt, '.git');
+    if (!fs.statSync(dotGit).isFile()) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf8'));
+    if (!m) return null;
+    const gitDir = fs.realpathSync(path.resolve(wt, m[1]));
+    // The git dir must be <common>/worktrees/<name> and point back at this worktree.
+    const common = fs.realpathSync(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim()));
+    if (path.basename(path.dirname(gitDir)) !== 'worktrees' || fs.realpathSync(path.dirname(path.dirname(gitDir))) !== common) return null;
+    const back = fs.realpathSync(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'gitdir'), 'utf8').trim()));
+    if (back.toLowerCase() !== fs.realpathSync(dotGit).toLowerCase()) return null;
+    const head = /^ref:\s*refs\/heads\/(\S+)$/.exec(fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim());
+    return head ? head[1] : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +301,15 @@ function evalGit(cmd, ctx, state, out) {
   const known = !otherDir && !state.branchUnknown && sameRepo(gitCwd, ctx);
   let current = null;
   if (known) current = state.branch !== undefined ? state.branch : ctx.branchAt(gitCwd);
+  // A commit in a linked worktree on a named, unprotected branch is as safe as one in this repo.
+  let worktreeKnown = false;
+  if (sub === 'commit' && !known && !otherDir && !state.branchUnknown) {
+    const b = linkedWorktreeBranch(gitCwd);
+    if (b !== null && !br.protected.has(b) && b !== br.integration && !/^etap\//.test(b)) {
+      worktreeKnown = true;
+      current = b;
+    }
+  }
   const isProt = (b) => b != null && br.protected.has(shortRef(b));
   const isInteg = (b) => b != null && br.integration != null && shortRef(b) === br.integration;
   const deny = (reason) => out.push({ decision: 'deny', reason });
@@ -289,7 +327,7 @@ function evalGit(cmd, ctx, state, out) {
   const branchDestructive =
     sub === 'branch' && args.some((a) => /^-[a-zA-Z]*[DdfMmCc]/.test(a) || ['--delete', '--force', '--move', '--copy'].includes(a));
   const checkoutForce = (sub === 'checkout' && args.some((a) => /^-[a-zA-Z]*B/.test(a))) || (sub === 'switch' && args.some((a) => /^-[a-zA-Z]*C/.test(a)));
-  if (!known && !abortLike && (STATE_CHANGING_GIT.has(sub) || branchDestructive || checkoutForce)) {
+  if (!known && !worktreeKnown && !abortLike && (STATE_CHANGING_GIT.has(sub) || branchDestructive || checkoutForce)) {
     ask(
       state.branchUnknown && !otherDir
         ? `git ${sub} runs after a switch to a previous branch (- or @{-N}) that could not be resolved, so the current branch is unknown. Confirm it is not protected.`
@@ -1345,6 +1383,29 @@ function evalClaudeConfig(cmd, ctx, state, out) {
   for (const p of candidates) if (hit(p)) return ask(p);
 }
 
+/** A session tied to a night run never writes .agent-scope: any command naming it, except plain readers, is denied. */
+const SCOPE_READERS = new Set(['cat', 'less', 'head', 'tail', 'more', 'bat', 'batcat', 'type', 'grep', 'egrep', 'fgrep', 'rg', 'get-content', 'gc', 'select-string', 'sls', 'ls', 'dir', 'wc', 'stat', 'test', '[']);
+// Known limit: interpreter writes that build the name at run time (heredoc scripts, string concatenation)
+// are not caught. This is a best-effort guard against a cooperative agent, not a sandbox.
+function evalAgentScope(cmd, ctx, state, out) {
+  const deny = () => out.push({ decision: 'deny', reason: SCOPE_DENY_REASON });
+  const root = ctx.scopeProtected;
+  // Only the session's own .agent-scope is protected; other worktrees' files may be written.
+  const own = (a) => namesOwnAgentScope(a, state.cwd, root);
+  for (const r of cmd.redirects ?? []) {
+    if (r.op !== '<' && own(r.target)) return deny();
+  }
+  if (!cmd.argv.length) return;
+  const b = baseName(cmd.argv[0]);
+  // Option forms that carry a path: of=x, --output=x, PowerShell -LiteralPath:x
+  const named = (a) => own(a.replace(/^(?:of=|-{1,2}[\w-]+[:=])/, ''));
+  if (b === 'git' && cmd.argv.slice(1).some((a) => /^--output(?:=|$)/.test(a) && named(a))) return deny();
+  if (SCOPE_READERS.has(b)) return;
+  if (b === 'git' && cmd.argv.slice(1).some((a) => ['status', 'diff', 'log', 'show', 'check-ignore'].includes(a))) return;
+  if (cmd.argv.slice(1).some(named)) return deny();
+  if (INTERPRETERS.has(b) && cmd.argv.some((a) => /\.agent-scope/i.test(a))) deny();
+}
+
 function evalCustom(cmd, ctx, out) {
   for (const [list, decision] of [
     [ctx.config.guard?.denyCommands, 'deny'],
@@ -1382,6 +1443,7 @@ export function evaluateBash(command, ctxOpts = {}) {
     try {
       if (!cmd.argv.length) {
         evalData(cmd, ctx, state, out, cmds);
+        if (ctx.scopeProtected) evalAgentScope(cmd, ctx, state, out);
         continue;
       }
       const b = baseName(cmd.argv[0]);
@@ -1401,6 +1463,7 @@ export function evaluateBash(command, ctxOpts = {}) {
       evalNetwork(cmd, ctx, state, out);
       evalPackages(cmd, out);
       evalClaudeConfig(cmd, ctx, state, out);
+      if (ctx.scopeProtected) evalAgentScope(cmd, ctx, state, out);
       evalCustom(cmd, ctx, out);
     } catch (err) {
       if (err instanceof BudgetExhausted) {
@@ -1421,7 +1484,7 @@ export function runHook(input, opts = {}) {
   if (!command.trim()) return null;
   const dialect = input.tool_name === 'PowerShell' ? 'powershell' : 'bash';
   try {
-    return evaluateBash(command, { cwd: input.cwd || process.cwd(), dialect, ...opts });
+    return evaluateBash(command, { cwd: input.cwd || process.cwd(), dialect, scopeProtected: protectedScopeRoot(input), ...opts });
   } catch (err) {
     if (RISKY_UNPARSED.test(command)) {
       return { decision: 'ask', reason: `The safety hook could not analyse this command (${err?.message ?? err}). It looks like a push, merge or delete, so confirm it by hand.` };
@@ -1430,10 +1493,64 @@ export function runHook(input, opts = {}) {
   }
 }
 
+const NODE_VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '--env-file', '-e', '--eval', '-p', '--print']);
+
+/** Index of the script argument of a `node` argv, skipping node's own flags, or -1. */
+function nodeScriptIndex(argv) {
+  let i = 1;
+  while (i < argv.length && argv[i].startsWith('-')) {
+    if (argv[i] === '--') return i + 1 < argv.length ? i + 1 : -1;
+    i += NODE_VALUE_FLAGS.has(argv[i]) ? 2 : 1;
+  }
+  return i < argv.length ? i : -1;
+}
+
+/**
+ * Night mode: a plain `node .../night-lock.mjs claim --run <id>` command registers its session in
+ * the marker, so the guard treats it as a night session from then on. Returns true when registered.
+ * Registration happens before the user answers, so it is narrow: the claim must be the first command
+ * of the line (not after `&&`, `||`, `;` or inside a conditional), `--run` must be present and equal
+ * to the marker's run id, and the run must have started.
+ */
+export function registerClaim(input, opts = {}) {
+  try {
+    if (!input || (input.tool_name !== 'Bash' && input.tool_name !== 'PowerShell')) return false;
+    const sessionId = input.session_id;
+    if (typeof sessionId !== 'string' || !sessionId) return false;
+    const dialect = input.tool_name === 'PowerShell' ? 'powershell' : 'bash';
+    const cmds = parseCommandLine(String(input.tool_input?.command ?? ''), { dialect });
+    const claim = cmds[0];
+    if (!claim || claim.depth !== 0 || claim.wrappers.length || claim.fromXargs || baseName(claim.argv[0]) !== 'node') return false;
+    const si = nodeScriptIndex(claim.argv);
+    if (si === -1 || baseName(claim.argv[si]) !== 'night-lock.mjs' || claim.argv[si + 1] !== 'claim') return false;
+    const rest = claim.argv.slice(si + 2);
+    if (rest.some((a) => a === '--help' || a === '-h')) return false;
+    const i = rest.findIndex((a) => a === '--run' || a.startsWith('--run='));
+    if (i === -1) return false;
+    const id = rest[i].startsWith('--run=') ? rest[i].slice(6) : rest[i + 1];
+    const file = markerPath(input.cwd || process.cwd());
+    const marker = readMarker(file, opts);
+    if (!marker || id !== marker.runId) return false;
+    if ((opts.now ?? Date.now()) < Date.parse(marker.start)) return false;
+    return registerSession(file, sessionId, opts);
+  } catch (err) {
+    if (err instanceof MarkerLockError) throw err; // fail closed: the caller denies the command
+    return false;
+  }
+}
+
 if (isMain(import.meta.url)) {
   try {
-    const v = runHook(readHookInput());
-    if (v) emitPreToolUse(v.decision, v.reason);
+    const input = readHookInput();
+    let v;
+    try {
+      registerClaim(input);
+      v = runHook(input);
+    } catch (err) {
+      if (!(err instanceof MarkerLockError)) throw err;
+      v = { decision: 'deny', reason: 'Night mode: the session could not be registered (marker lock busy); the claim is refused. Retry.' };
+    }
+    if (v) emitPreToolUse(v.decision, v.reason, input);
   } catch {
     // Never block on an internal error.
   }

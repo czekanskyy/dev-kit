@@ -160,6 +160,11 @@
     "reports": "reports/",
     "handoff": "queue/handoff.md"
   },
+  "night": {
+    "merge": "none",
+    "rules": "docs/night-rules.md",
+    "maxRunHours": 12
+  },
   "notify": {
     "ntfy": {
       "server": "https://ntfy.example.com",

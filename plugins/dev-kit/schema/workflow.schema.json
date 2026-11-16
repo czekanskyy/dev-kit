@@ -334,6 +334,25 @@
         "handoff": { "type": "string", "default": "queue/handoff.md" }
       }
     },
+    "night": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Planned unattended runs. Optional: without it the night skills stop with a message naming this key.",
+      "properties": {
+        "merge": {
+          "enum": ["none", "lowRisk"],
+          "default": "none",
+          "description": "none: a run never merges, every PR stays open. lowRisk: a run may merge low-risk T0 and T1 tasks into the integration branch."
+        },
+        "rules": { "type": "string", "description": "Path of the project's rules doc for night runs." },
+        "maxRunHours": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 12,
+          "description": "Longest time-box a run may be armed for."
+        }
+      }
+    },
     "notify": {
       "type": "object",
       "additionalProperties": false,

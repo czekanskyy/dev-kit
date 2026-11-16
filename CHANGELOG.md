@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0
+
+Night mode: a planned, time-boxed, unattended run that asks nothing and defers what gets stuck.
+
+- `/dev-kit:plan-night`: triages each request, queues a T2 or T3 item only with an accepted spec
+  without open decisions, asks every remaining question in one round, writes the queue file
+  (`paths.queue`), validates it and offers to arm the run or create a trigger. Refuses while a run is
+  busy. Writes no code.
+- `/dev-kit:night-run [--until <time> | --for <hours>] [--start <time>] [--resumable]`: arms the run,
+  claims it, checks usage before each task, builds each task through `quick-fix` or `build-task` in
+  its own worktree, defers instead of asking, leaves T3 and risk-path PRs open as waiting for merge
+  and merges only where `night.merge` allows. A `--resumable` run pauses at the 5-hour window and a
+  separate hourly bare `/dev-kit:night-run` continues it.
+- `/dev-kit:run-report [--digest]`: writes the run report (merged, waiting for merge, other open PRs,
+  deferred and interrupted with the action to take, not started, usage, next steps), sends one quiet
+  push with counts only and releases the run. `--digest` writes a morning digest of the runs since the
+  previous digest.
+- New optional config key `night`: `merge` (`none` or `lowRisk`, default `none`), `rules` (path of the
+  project's night rules doc) and `maxRunHours` (default 12). The existing `limits.nightWindowPauseAt` applies
+  to the 5-hour window.
+- `scripts/queue.mjs`: `validate`, `next`, `route`, `set`, `usage`, `heartbeat`, `busy`, `warn`, `run`
+  and `summary`. Claims the run per session, recovers stale runs, hashes the queue plan and keeps run
+  state in `night-state.json` next to the queue file.
+- `scripts/night-lock.mjs`: `acquire`, `claim`, `status`, `keepawake` and `release` for the run marker
+  and the sleep lock.
+- Notify hook: a `rate_limit` stop failure in a night session marks the running task interrupted and
+  sends a `high` push.
+- Guard: for sessions registered in the night marker every `ask` becomes a `deny` with a `Night mode:`
+  reason. The queue file and the marker are protected from writes in night sessions, including
+  long-path, device and UNC path forms, symlinks and short names.
+- Guard: `git commit` in a linked worktree on an unprotected work branch of another repository no longer
+  asks.
+- No evals for the night skills: they set `disable-model-invocation`, so the eval harness cannot start them. Their behaviour is covered by the script tests and the trial runs.
+
 ## 0.3.0
 
 Spec template.

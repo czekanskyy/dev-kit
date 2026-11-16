@@ -16,6 +16,7 @@ import {
   toAbsolute,
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
+import { isNightSession, markerPath, samePath } from '../scripts/lib/night.mjs';
 
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -50,6 +51,78 @@ function regenerateHint(config) {
   const keys = Object.keys(config.commands ?? {}).filter((k) => /gen|codegen|types/i.test(k) && config.commands[k]);
   if (keys.length) return keys.map((k) => `\`${config.commands[k]}\` (commands.${k})`).join(' or ');
   return "the project's generator command";
+}
+
+const SCOPE_NAME = /^(?:[a-z]:)?\.agent-scope[. ]*(:.*)?$/i;
+const DRIVE_RELATIVE = /^[a-z]:(?![\\/])/i;
+
+/** True when a path argument names a `.agent-scope` file (trailing dots/spaces and streams ignored, simple globs too). */
+export function namesAgentScope(arg, cwd) {
+  const s = String(arg ?? '');
+  if (!s) return false;
+  const last = normalizePath(s).split('/').pop() ?? '';
+  if (SCOPE_NAME.test(last)) return true;
+  if (/[*?[]/.test(last)) {
+    try {
+      const dir = path.dirname(toAbsolute(s, cwd || process.cwd()));
+      return globMatch(s, toAbsolute('.agent-scope', dir), { root: cwd || dir });
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * The root of the session's own working tree when its `.agent-scope` already carries a `run:` line
+ * (that file must stay as it is), else null. Only the own file is protected: a registered
+ * orchestrator creates scope files in other worktrees, and creating one where none exists is fine.
+ */
+export function protectedScopeRoot(input) {
+  try {
+    const root = findRepoRoot(path.resolve(input?.cwd || process.cwd()));
+    if (!root) return null;
+    const text = fs.readFileSync(path.join(root, '.agent-scope'), 'utf8');
+    return /^[ \t]*run:/m.test(text) ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+export function scopeProtected(input) {
+  return protectedScopeRoot(input) !== null;
+}
+
+/** True when `arg` names the `.agent-scope` at `scopeRoot` (the session's own), resolved against `cwd`. */
+export function namesOwnAgentScope(arg, cwd, scopeRoot) {
+  if (!scopeRoot || !namesAgentScope(arg, cwd)) return false;
+  try {
+    const s = String(arg).replace(DRIVE_RELATIVE, '');
+    const dir = path.dirname(toAbsolute(s, cwd || process.cwd()));
+    return samePath(dir, scopeRoot);
+  } catch {
+    return true;
+  }
+}
+
+export const SCOPE_DENY_REASON =
+  'Night mode: .agent-scope ties this worktree to the night run and is not edited, deleted or overwritten by a run. Leave it as it is and note the task in the run report.';
+
+/** Night mode: a night session may not write the queue or the marker. Returns a deny verdict or null. */
+function nightWriteDeny(input, abs, target, { config, root, now }) {
+  const nightOpts = now === undefined ? {} : { now };
+  const marker = markerPath(input.cwd || process.cwd());
+  const queueRel = config.paths?.queue || 'queue/night.md';
+  const roots = new Set([root]);
+  if (marker) roots.add(normalizePath(path.dirname(path.dirname(path.dirname(marker)))));
+  const isMarker = Boolean(marker) && samePath(abs, marker);
+  const isQueue = [...roots].some((r) => samePath(abs, toAbsolute(queueRel, r)));
+  if (!isMarker && !isQueue) return null;
+  if (!isNightSession(input, nightOpts)) return null;
+  return {
+    decision: 'deny',
+    reason: `Night mode: "${target}" is ${isMarker ? 'the night marker' : 'the night queue'}, which a run never writes. Defer the task and note it in the run report.`,
+  };
 }
 
 /**
@@ -136,6 +209,17 @@ export function evaluateFileTool(input, opts = {}) {
     }
   }
 
+  if (namesOwnAgentScope(target, cwd, protectedScopeRoot(input))) {
+    out.push({ decision: 'deny', reason: SCOPE_DENY_REASON });
+  }
+
+  try {
+    const night = nightWriteDeny(input, abs, target, { config, root, now: opts.now });
+    if (night) out.push(night);
+  } catch {
+    // A failing night helper must not discard the other verdicts.
+  }
+
   const pluginRoot = opts.pluginRoot ?? env.CLAUDE_PLUGIN_ROOT;
   const isClaudeConfig =
     anyGlob(CLAUDE_CONFIG_GLOBS, abs, globOpts) ||
@@ -152,8 +236,9 @@ export function evaluateFileTool(input, opts = {}) {
 
 if (isMain(import.meta.url)) {
   try {
-    const v = evaluateFileTool(readHookInput());
-    if (v) emitPreToolUse(v.decision, v.reason);
+    const input = readHookInput();
+    const v = evaluateFileTool(input);
+    if (v) emitPreToolUse(v.decision, v.reason, input);
   } catch {
     // Never block on an internal error.
   }
