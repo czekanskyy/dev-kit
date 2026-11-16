@@ -7,9 +7,9 @@ deep-merged over `defaults.json` and validated against `schema/workflow.schema.j
 | Folder | Contents |
 |---|---|
 | `agents/` | `explorer`, `quick-fixer`, `implementer`, `planner`, `reviewer`, `dep-researcher` |
-| `skills/` | `triage-task`, `quick-fix`, `build-task`, `review-changes`, `audit-docs` |
-| `hooks/` | bash guard, file guard, stop check, notifications |
-| `scripts/` | `config.mjs`, `risk.mjs`, `gate.mjs`, `notify.mjs` |
+| `skills/` | `triage-task`, `quick-fix`, `build-task`, `review-changes`, `audit-docs`, `plan-feature`, `fix-bug`, `update-deps`, `workflow-help`, `plan-night`, `night-run`, `run-report` |
+| `hooks/` | bash guard, file guard, stop check, notifications (with a night branch) |
+| `scripts/` | `config.mjs`, `risk.mjs`, `gate.mjs`, `notify.mjs`, `deps.mjs`, `codex-review.mjs`, `queue.mjs`, `night-lock.mjs` |
 | `schema/` | JSON Schema for `.claude/workflow.json` |
 
 Install:

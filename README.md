@@ -71,6 +71,16 @@ commit statuses. Codex review is optional and uses the Codex plugin when install
 | `/dev-kit:build-task <brief or spec task>` | T1 or one spec task: implementer, gate, review, docs, PR, merge per tier |
 | `/dev-kit:review-changes <PR or branch>` | Independent review, security pass on risk paths, optional Codex second opinion |
 | `/dev-kit:audit-docs [area]` | Compares docs and agent setup with the real code, then fixes what you pick |
+| `/dev-kit:plan-feature <request>` | Triages a T2 or T3 request, writes the spec, asks every open decision in one round |
+| `/dev-kit:fix-bug <bug>` | Reproduce, root cause, failing test first, minimal fix, then the `build-task` steps |
+| `/dev-kit:update-deps` | Inventory of outdated packages, researched per family, one dated report; installs nothing |
+| `/dev-kit:workflow-help` | Read-only state summary and one proposed next skill |
+| `/dev-kit:plan-night <requests>` | Night mode: queues triaged, fully specified tasks for an unattended run |
+| `/dev-kit:night-run [--until <time> \| --for <hours>]` | Night mode: arms and works the queue unattended, defers instead of asking |
+| `/dev-kit:run-report [--digest]` | Night mode: run report, quiet push, release; `--digest` for the morning digest |
+
+Night mode needs the optional `night` config key (`merge`, `rules`, `maxRunHours`); see the
+[manual](plugins/dev-kit/WORKFLOW.md#night-mode).
 
 Agents (used by the skills, also callable as `dev-kit:<name>`): `explorer`, `quick-fixer`,
 `implementer`, `planner`, `reviewer`, `dep-researcher`.

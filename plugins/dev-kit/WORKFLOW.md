@@ -189,9 +189,53 @@ Messages carry only a title and a link.
 | `/dev-kit:fix-bug` | `/dev-kit:fix-bug Saving a draft loses the selected category` |
 | `/dev-kit:update-deps` | `/dev-kit:update-deps` |
 | `/dev-kit:workflow-help` | `/dev-kit:workflow-help` |
+| `/dev-kit:plan-night` | `/dev-kit:plan-night Fix the footer link; build task 2 of specs/newsletter-signup.md` |
+| `/dev-kit:night-run` | `/dev-kit:night-run --until 06:00` |
+| `/dev-kit:run-report` | `/dev-kit:run-report --digest` |
 
-Coming next: night mode (`/plan-night`, unattended queue, morning report). A release skill is
-project specific (it knows your stages and environments), so it lives in the project, not in the kit.
+A release skill is project specific (it knows your stages and environments), so it lives in the
+project, not in the kit.
+
+## Night mode
+
+A planned, time-boxed run that works a queue unattended. It asks nothing: whatever would need you is
+deferred with a reason and the run moves on. It needs the `night` config key (`merge`, `rules`,
+`maxRunHours`) and a rules doc at `night.rules` listing what must be true before a run and what a run
+must not touch.
+
+1. **Plan (evening).** `/dev-kit:plan-night <requests>` triages each request, asks every open
+   question in one round and writes the queue file (`paths.queue`). T2 and T3 items are queued only
+   with an accepted spec that has no `Needs decision` row; T0 and T1 need a brief or a spec task. It
+   refuses while another run is busy and writes nothing else.
+2. **Arm and run.** `/dev-kit:night-run --until 06:00` (or `--for 8`, optionally `--start <time>`)
+   arms the run (a marker plus a sleep lock; the box may not exceed `night.maxRunHours`), claims it
+   and works the queue. Every task gets its own worktree and goes through `quick-fix` or
+   `build-task`. Start it from a trigger or by hand.
+3. **Resumable runs.** With `--resumable` a run that hits the 5-hour window pauses, writes a handoff
+   to `paths.handoff` and keeps the marker. A second, separate trigger runs bare `/dev-kit:night-run`
+   every hour; it only continues an armed run and does nothing otherwise.
+4. **Usage thresholds.** Before each task the run reads usage and `queue.mjs usage` answers from
+   `limits`: 75 lowers subagent effort; 90 weekly leaves only T0 and T1 tasks and sends one `high`
+   push; 90 of the 5-hour window (`nightWindowPauseAt`) pauses; 95 weekly stops the run.
+5. **Merge policy.** `night.merge: none` (default): every PR stays open. `lowRisk`: a T0 or T1 task
+   with no risk path, a green gate on the PR head and an APPROVE review is merged into the
+   integration branch. A T3 spec or a risk path is never merged at night, at any setting (rule D15):
+   its PR waits for you, with one quiet push.
+6. **Files.** The queue is `paths.queue`, written by you or `plan-night` only. Run state is
+   `night-state.json` next to it, written through `queue.mjs`. The marker lives in
+   `<git-common-dir>/dev-kit/night.json`. Reports are `paths.reports/YYYY-MM-DD-HHMM.md`.
+7. **What the guard defers.** For a session registered in the marker every `ask` becomes a `deny`
+   with a `Night mode:` reason (package installs, `.claude/` and hook edits, risk-path merges). The
+   session may not write the queue or the marker, whatever the path form (long-path, device and UNC
+   forms, symlinks, short names). The run defers the task instead of working around it.
+8. **Morning.** `/dev-kit:run-report` ends every run: it writes the report (merged, waiting for
+   merge, other open PRs, deferred and interrupted with the action to take, not started, usage, next
+   steps), sends one counts-only push and releases the marker and the sleep lock.
+   `/dev-kit:run-report --digest` writes one digest of the runs since the previous digest.
+9. **Recovery after a crash.** `node scripts/queue.mjs busy` prints whether a run is live or
+   unreported (exit 1 while it is). A stale `running` task of a dead session becomes `interrupted` on
+   the next `queue.mjs next`. Close the run by hand with `queue.mjs run stopped` or
+   `queue.mjs run finished`, then `/dev-kit:run-report` to write the report and release the marker.
 
 ## Typical scenarios
 
