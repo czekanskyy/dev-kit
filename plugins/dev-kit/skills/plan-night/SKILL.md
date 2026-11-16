@@ -93,9 +93,11 @@ Never guess an answer. A question left unanswered means the task is not queued.
 
 Before writing, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/queue.mjs" busy` and
 `node "${CLAUDE_PLUGIN_ROOT}/scripts/night-lock.mjs" status`. `busy` prints `{busy, reason}` and exits 1
-while a run is live, paused or crashed and not ended. Exit 1: refuse to overwrite the queue, write
-nothing, say why (the `reason` from its output) and what to do: wait for the run to end, or finish it
-with `/dev-kit:run-report`, then plan again. A `night-lock.mjs status` that is not valid JSON or reports
+while a run is live, paused or crashed and not ended. Any non-zero exit stops planning: refuse to
+overwrite the queue and write nothing. Exit 1 (busy): say why (the `reason` from its output) and what
+to do: wait for the run to end, or finish it with `/dev-kit:run-report` (it marks the run finished
+before it releases the marker), then plan again. Exit 2 (unreadable or corrupt state): show the
+error, tell the developer the state file needs a look, and stop. A `night-lock.mjs status` that is not valid JSON or reports
 an error is also a stop: show it. A plain `valid: false` (no armed run) is fine here.
 
 Order the tasks the way they should run, dependencies first. Write `paths.queue` (overwrite the
