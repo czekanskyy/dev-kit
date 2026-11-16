@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isNightSession } from './night.mjs';
 
 /** Reads the hook's JSON input from stdin. Returns {} when stdin is empty. */
 export function readHookInput() {
@@ -24,15 +25,33 @@ export function isMain(importMetaUrl) {
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-/** Prints a PreToolUse decision. Only 'deny' and 'ask' are ever emitted. */
-export function emitPreToolUse(decision, reason) {
-  if (decision !== 'deny' && decision !== 'ask') return;
+export const NIGHT_DENY_PREFIX = 'Night mode: deferred, needs the developer: ';
+
+/**
+ * Night mode: for a registered night session every `ask` becomes a `deny`. Denies are unchanged,
+ * nothing becomes allow. Returns null or {decision, reason}. opts: { now, markerFile }.
+ */
+export function nightVerdict(verdict, input, opts = {}) {
+  if (!verdict || (verdict.decision !== 'deny' && verdict.decision !== 'ask')) return null;
+  if (verdict.decision === 'ask' && input && isNightSession(input, opts)) {
+    return { decision: 'deny', reason: `${NIGHT_DENY_PREFIX}${verdict.reason}` };
+  }
+  return verdict;
+}
+
+/**
+ * Prints a PreToolUse decision. Only 'deny' and 'ask' are ever emitted.
+ * With the hook input given, an `ask` of a night session is printed as a `deny`.
+ */
+export function emitPreToolUse(decision, reason, input = null, opts = {}) {
+  const v = nightVerdict({ decision, reason }, input, opts);
+  if (!v) return;
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: decision,
-        permissionDecisionReason: reason,
+        permissionDecision: v.decision,
+        permissionDecisionReason: v.reason,
       },
     }),
   );

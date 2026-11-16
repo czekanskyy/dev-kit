@@ -16,6 +16,7 @@ import {
   toAbsolute,
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
+import { isNightSession, markerPath, samePath } from '../scripts/lib/night.mjs';
 
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -50,6 +51,23 @@ function regenerateHint(config) {
   const keys = Object.keys(config.commands ?? {}).filter((k) => /gen|codegen|types/i.test(k) && config.commands[k]);
   if (keys.length) return keys.map((k) => `\`${config.commands[k]}\` (commands.${k})`).join(' or ');
   return "the project's generator command";
+}
+
+/** Night mode: a night session may not write the queue or the marker. Returns a deny verdict or null. */
+function nightWriteDeny(input, abs, target, { config, root, now }) {
+  const nightOpts = now === undefined ? {} : { now };
+  const marker = markerPath(input.cwd || process.cwd());
+  const queueRel = config.paths?.queue || 'queue/night.md';
+  const roots = new Set([root]);
+  if (marker) roots.add(normalizePath(path.dirname(path.dirname(path.dirname(marker)))));
+  const isMarker = Boolean(marker) && samePath(abs, marker);
+  const isQueue = [...roots].some((r) => samePath(abs, toAbsolute(queueRel, r)));
+  if (!isMarker && !isQueue) return null;
+  if (!isNightSession(input, nightOpts)) return null;
+  return {
+    decision: 'deny',
+    reason: `Night mode: "${target}" is ${isMarker ? 'the night marker' : 'the night queue'}, which a run never writes. Defer the task and note it in the run report.`,
+  };
 }
 
 /**
@@ -136,6 +154,9 @@ export function evaluateFileTool(input, opts = {}) {
     }
   }
 
+  const night = nightWriteDeny(input, abs, target, { config, root, now: opts.now });
+  if (night) out.push(night);
+
   const pluginRoot = opts.pluginRoot ?? env.CLAUDE_PLUGIN_ROOT;
   const isClaudeConfig =
     anyGlob(CLAUDE_CONFIG_GLOBS, abs, globOpts) ||
@@ -152,8 +173,9 @@ export function evaluateFileTool(input, opts = {}) {
 
 if (isMain(import.meta.url)) {
   try {
-    const v = evaluateFileTool(readHookInput());
-    if (v) emitPreToolUse(v.decision, v.reason);
+    const input = readHookInput();
+    const v = evaluateFileTool(input);
+    if (v) emitPreToolUse(v.decision, v.reason, input);
   } catch {
     // Never block on an internal error.
   }

@@ -19,6 +19,7 @@ import {
   toAbsolute,
 } from '../scripts/lib/config.mjs';
 import { combineVerdicts, emitPreToolUse, isMain, readHookInput } from '../scripts/lib/hook.mjs';
+import { markerPath, readMarker, registerSession } from '../scripts/lib/night.mjs';
 import { baseName, parseCommandLine, parseOpts } from '../scripts/lib/shell.mjs';
 import { analyzeRisk } from '../scripts/risk.mjs';
 
@@ -1430,10 +1431,48 @@ export function runHook(input, opts = {}) {
   }
 }
 
+/**
+ * Night mode: a `node .../night-lock.mjs claim [--run <id>]` command registers its session in the
+ * marker, so the guard treats it as a night session from then on. Returns true when registered.
+ * Nothing happens without a valid marker, or when --run names another run.
+ */
+export function registerClaim(input, opts = {}) {
+  try {
+    if (!input || (input.tool_name !== 'Bash' && input.tool_name !== 'PowerShell')) return false;
+    const sessionId = input.session_id;
+    if (typeof sessionId !== 'string' || !sessionId) return false;
+    const dialect = input.tool_name === 'PowerShell' ? 'powershell' : 'bash';
+    const cmds = parseCommandLine(String(input.tool_input?.command ?? ''), { dialect });
+    const claim = cmds.find(
+      (c) =>
+        c.depth === 0 &&
+        c.argv.length >= 3 &&
+        baseName(c.argv[0]) === 'node' &&
+        baseName(c.argv[1]) === 'night-lock.mjs' &&
+        c.argv[2] === 'claim',
+    );
+    if (!claim) return false;
+    const file = markerPath(input.cwd || process.cwd());
+    const marker = readMarker(file, opts);
+    if (!marker) return false;
+    const rest = claim.argv.slice(3);
+    const i = rest.findIndex((a) => a === '--run' || a.startsWith('--run='));
+    if (i !== -1) {
+      const id = rest[i].startsWith('--run=') ? rest[i].slice(6) : rest[i + 1];
+      if (id !== marker.runId) return false;
+    }
+    return registerSession(file, sessionId, opts);
+  } catch {
+    return false;
+  }
+}
+
 if (isMain(import.meta.url)) {
   try {
-    const v = runHook(readHookInput());
-    if (v) emitPreToolUse(v.decision, v.reason);
+    const input = readHookInput();
+    registerClaim(input);
+    const v = runHook(input);
+    if (v) emitPreToolUse(v.decision, v.reason, input);
   } catch {
     // Never block on an internal error.
   }
